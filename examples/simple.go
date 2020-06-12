@@ -23,8 +23,14 @@ func main() {
 	client := amqprpc.New(conn, conn)
 	go client.Run(ctx)
 
+	// Client has some configuration properties.
+	// By default client creates a temporary queue, but you can provide a custom queue.
+	// client.ReplyQueue = "custom_reply_queue"
+
 	reqCtx, reqCancelFunc := context.WithTimeout(ctx, time.Second)
-	replyCh := client.Call(reqCtx, amqp.Publishing{
+
+	// Do RPC
+	replyCh := client.Call(reqCtx, "a_queue", "", amqp.Publishing{
 		Body: []byte(`Have you heard the news?`),
 	})
 	defer reqCancelFunc()

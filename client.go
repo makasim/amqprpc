@@ -88,7 +88,7 @@ func (c *RPCClient) Run(ctx context.Context) {
 	wg.Done()
 }
 
-func (c *RPCClient) Call(ctx context.Context, msg amqp.Publishing) <-chan Reply {
+func (c *RPCClient) Call(ctx context.Context, queue, exchange string, msg amqp.Publishing) <-chan Reply {
 	msg.CorrelationId = uuid.New().String()
 	msg.ReplyTo = c.ReplyQueue
 	publishResultCh := make(chan error)
@@ -104,8 +104,8 @@ func (c *RPCClient) Call(ctx context.Context, msg amqp.Publishing) <-chan Reply 
 	}
 
 	c.publisher.Publish(amqpextra.Publishing{
-		Exchange:  "",
-		Key:       c.ReplyQueue,
+		Exchange:  exchange,
+		Key:       queue,
 		Mandatory: false,
 		Immediate: false,
 		WaitReady: true,
