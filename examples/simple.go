@@ -1,7 +1,4 @@
-# Golang AMQP RPC Client
-
-```go
-package examples
+package main
 
 import (
 	"context"
@@ -44,4 +41,3 @@ func main() {
 		reqCancelFunc()
 	}
 }
-```

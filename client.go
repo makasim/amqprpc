@@ -1,4 +1,4 @@
-package rpcclient
+package amqprpc
 
 import (
 	"context"
@@ -31,6 +31,7 @@ type RPCClient struct {
 	consumerConn  *amqpextra.Connection
 	publisherConn *amqpextra.Connection
 	publisher     *amqpextra.Publisher
+	initErr       error
 }
 
 func New(consumerConn *amqpextra.Connection, publisherConn *amqpextra.Connection) *RPCClient {
@@ -47,14 +48,16 @@ func New(consumerConn *amqpextra.Connection, publisherConn *amqpextra.Connection
 	}
 }
 
-func (c *RPCClient) Run(ctx context.Context) error {
+func (c *RPCClient) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 
 	declareQueue := true
 	if c.ReplyQueue == "" {
 		q, err := amqpextra.TempQueue(ctx, c.consumerConn)
 		if err != nil {
-			return err
+			c.initErr = err
+
+			return
 		}
 
 		declareQueue = false
@@ -83,8 +86,6 @@ func (c *RPCClient) Run(ctx context.Context) error {
 	}()
 
 	wg.Done()
-
-	return nil
 }
 
 func (c *RPCClient) Call(ctx context.Context, msg amqp.Publishing) <-chan Reply {
@@ -92,6 +93,15 @@ func (c *RPCClient) Call(ctx context.Context, msg amqp.Publishing) <-chan Reply 
 	msg.ReplyTo = c.ReplyQueue
 	publishResultCh := make(chan error)
 	replyCh := make(chan Reply, 1)
+
+	if c.initErr != nil {
+		replyCh <- Reply{
+			Err: c.initErr,
+			Msg: amqp.Delivery{},
+		}
+
+		return replyCh
+	}
 
 	c.publisher.Publish(amqpextra.Publishing{
 		Exchange:  "",
