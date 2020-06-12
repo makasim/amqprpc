@@ -1,7 +1,4 @@
-# Golang AMQP RPC Client
-
-```go
-package examples
+package main
 
 import (
 	"context"
@@ -26,16 +23,31 @@ func main() {
 	client := amqprpc.New(conn, conn)
 	go client.Run(ctx)
 
+	// Client has some configuration properties.
+	// By default client creates a temporary queue, but you can provide a custom queue.
+	// client.ReplyQueue = "custom_reply_queue"
+
 	reqCtx, reqCancelFunc := context.WithTimeout(ctx, time.Second)
-	replyCh := client.Call(reqCtx, amqp.Publishing{
-		Body: []byte(`Have you heard the news?`),
-	})
 	defer reqCancelFunc()
+
+	// Do RPC
+	replyCh := client.Call(reqCtx, amqpextra.Publishing{
+		Key: "a_queue",
+		Message: amqp.Publishing{
+			Body: []byte(`Have you heard the news?`),
+		},
+	})
 
 	select {
 	case <-reqCtx.Done():
 		// No reply with given time.
 	case r := <-replyCh:
+		if r.Err != nil {
+			log.Printf(r.Err.Error())
+
+			return
+		}
+
 		log.Print(string(r.Msg.Body))
 	case <-ctx.Done():
 		// The application is about to stop.
@@ -44,4 +56,3 @@ func main() {
 		reqCancelFunc()
 	}
 }
-```
