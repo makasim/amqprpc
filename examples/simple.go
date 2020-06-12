@@ -30,8 +30,11 @@ func main() {
 	reqCtx, reqCancelFunc := context.WithTimeout(ctx, time.Second)
 
 	// Do RPC
-	replyCh := client.Call(reqCtx, "a_queue", "", amqp.Publishing{
-		Body: []byte(`Have you heard the news?`),
+	replyCh := client.Call(reqCtx, amqpextra.Publishing{
+		Key: "a_queue",
+		Message: amqp.Publishing{
+			Body: []byte(`Have you heard the news?`),
+		},
 	})
 	defer reqCancelFunc()
 

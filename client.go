@@ -88,10 +88,11 @@ func (c *RPCClient) Run(ctx context.Context) {
 	wg.Done()
 }
 
-func (c *RPCClient) Call(ctx context.Context, queue, exchange string, msg amqp.Publishing) <-chan Reply {
-	msg.CorrelationId = uuid.New().String()
-	msg.ReplyTo = c.ReplyQueue
-	publishResultCh := make(chan error)
+func (c *RPCClient) Call(ctx context.Context, msg amqpextra.Publishing) <-chan Reply {
+	msg.Message.CorrelationId = uuid.New().String()
+	msg.Message.ReplyTo = c.ReplyQueue
+	msg.ResultCh = make(chan error)
+
 	replyCh := make(chan Reply, 1)
 
 	if c.initErr != nil {
@@ -103,18 +104,10 @@ func (c *RPCClient) Call(ctx context.Context, queue, exchange string, msg amqp.P
 		return replyCh
 	}
 
-	c.publisher.Publish(amqpextra.Publishing{
-		Exchange:  exchange,
-		Key:       queue,
-		Mandatory: false,
-		Immediate: false,
-		WaitReady: true,
-		Message:   msg,
-		ResultCh:  publishResultCh,
-	})
+	c.publisher.Publish(msg)
 
 	c.pool.set(request{
-		CorrID:  msg.CorrelationId,
+		CorrID:  msg.Message.CorrelationId,
 		Ctx:     ctx,
 		ReplyCh: replyCh,
 	})
@@ -125,7 +118,7 @@ func (c *RPCClient) Call(ctx context.Context, queue, exchange string, msg amqp.P
 			Err: ctx.Err(),
 			Msg: amqp.Delivery{},
 		}
-	case err := <-publishResultCh:
+	case err := <-msg.ResultCh:
 		if err != nil {
 			replyCh <- Reply{
 				Err: err,
