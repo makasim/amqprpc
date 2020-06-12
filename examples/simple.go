@@ -28,6 +28,7 @@ func main() {
 	// client.ReplyQueue = "custom_reply_queue"
 
 	reqCtx, reqCancelFunc := context.WithTimeout(ctx, time.Second)
+	defer reqCancelFunc()
 
 	// Do RPC
 	replyCh := client.Call(reqCtx, amqpextra.Publishing{
@@ -36,7 +37,6 @@ func main() {
 			Body: []byte(`Have you heard the news?`),
 		},
 	})
-	defer reqCancelFunc()
 
 	select {
 	case <-reqCtx.Done():
