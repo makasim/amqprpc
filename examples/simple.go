@@ -33,6 +33,12 @@ func main() {
 	case <-reqCtx.Done():
 		// No reply with given time.
 	case r := <-replyCh:
+		if r.Err != nil {
+			log.Printf(r.Err.Error())
+
+			return
+		}
+
 		log.Print(string(r.Msg.Body))
 	case <-ctx.Done():
 		// The application is about to stop.
