@@ -1,36 +1,51 @@
 package amqprpc
 
 import (
-	"time"
-
-	"github.com/patrickmn/go-cache"
+	"sync"
 )
 
 type pool struct {
-	c *cache.Cache
+	lock  sync.Mutex
+	calls map[string]*Call
 }
 
-func (p *pool) set(r request) {
-	ttl := cache.DefaultExpiration
-
-	deadline, ok := r.Ctx.Deadline()
-	if ok {
-		ttl = deadline.Sub(time.Now())
+func newPool() *pool {
+	return &pool{
+		calls: make(map[string]*Call),
 	}
-
-	p.c.Set(r.CorrID, r, ttl)
 }
 
-func (p *pool) get(corrID string) (request, bool) {
-	i, ok := p.c.Get(corrID)
+func (p *pool) set(c *Call) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	p.calls[c.Publishing.Message.CorrelationId] = c
+}
+
+func (p *pool) fetch(corrID string) (*Call, bool) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	c, ok := p.calls[corrID]
 	if !ok {
-		return request{}, false
+		return nil, false
 	}
 
-	r, ok := i.(request)
-	if !ok {
-		return request{}, false
-	}
+	delete(p.calls, corrID)
 
-	return r, true
+	return c, true
+}
+
+func (p *pool) delete(corrID string) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	delete(p.calls, corrID)
+}
+
+func (p *pool) count() int {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	return len(p.calls)
 }
