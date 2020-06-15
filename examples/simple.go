@@ -15,12 +15,19 @@ func main() {
 	var conn *amqpextra.Connection
 
 	// In some cases you might want to provide different connections for consumer and publisher.
-	client := amqprpc.New(conn, conn)
-	go client.Run()
-
-	// Client has some configuration properties.
-	// By default client creates a temporary queue, but you can provide a custom queue.
-	// client.ReplyQueue = "custom_reply_queue"
+	client, err := amqprpc.New(
+		conn,
+		conn,
+		// add some options
+		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
+			Name:    "custom_reply_queue",
+			Declare: true,
+		}),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.Close()
 
 	// Do RPC
 	call := client.Go(amqpextra.Publishing{
@@ -29,11 +36,20 @@ func main() {
 			Body: []byte(`Have you heard the news?`),
 		},
 	}, make(chan *amqprpc.Call, 1))
+	defer call.Cancel()
 
 	select {
 	case <-call.Done():
-		log.Print(string(call.Delivery().Body))
+		rpl, err := call.Delivery()
+		if err != nil {
+			log.Fatal(err)
+
+			return
+		}
+
+		log.Print(string(rpl.Body))
+
 	case <-time.NewTimer(time.Second).C:
-		call.Cancel()
+		// timeout
 	}
 }

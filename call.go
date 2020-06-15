@@ -3,37 +3,56 @@ package amqprpc
 import (
 	"sync"
 
+	"log"
+
 	"github.com/makasim/amqpextra"
 	"github.com/streadway/amqp"
 )
 
 type Call struct {
+	AutoAck bool
+
 	mutex sync.Mutex
-	error error
 
 	publishing amqpextra.Publishing
 	delivery   amqp.Delivery
-	doneCh     chan *Call
+	error      error
+
+	doneCh chan *Call
+	done   bool
 
 	pool *pool
 }
 
-func (call *Call) Error() error {
-	call.mutex.Lock()
-	defer call.mutex.Unlock()
+func newCall(msg amqpextra.Publishing, doneCh chan *Call, autoAck bool) *Call {
+	if doneCh == nil {
+		doneCh = make(chan *Call, 1)
+	} else {
+		if cap(doneCh) == 0 {
+			log.Panic("amqprpc: ok channel is unbuffered")
+		}
+	}
 
-	return call.error
+	return &Call{
+		AutoAck:    autoAck,
+		publishing: msg,
+		doneCh:     doneCh,
+	}
 }
 
 func (call *Call) Publishing() amqpextra.Publishing {
 	return call.publishing
 }
 
-func (call *Call) Delivery() amqp.Delivery {
+func (call *Call) Delivery() (amqp.Delivery, error) {
 	call.mutex.Lock()
 	defer call.mutex.Unlock()
 
-	return call.delivery
+	if !call.done {
+		return amqp.Delivery{}, ErrNotDone
+	}
+
+	return call.delivery, call.error
 }
 
 func (call *Call) Done() <-chan *Call {
@@ -44,10 +63,15 @@ func (call *Call) Cancel() {
 	call.mutex.Lock()
 	defer call.mutex.Unlock()
 
+	if call.done {
+		return
+	}
+
 	call.pool.delete(call.Publishing().Message.CorrelationId)
+	call.done = true
 	call.error = Canceled
 
-	// drain done channel
+	// drain ok channel
 	for {
 		select {
 		case <-call.Done():
@@ -61,16 +85,29 @@ func (call *Call) errored(err error) {
 	call.mutex.Lock()
 	defer call.mutex.Unlock()
 
+	if call.done {
+		return
+	}
+
+	call.pool.delete(call.Publishing().Message.CorrelationId)
+	call.done = true
 	call.error = err
-	call.delivery = amqp.Delivery{}
 	call.doneCh <- call
 }
 
-func (call *Call) done(msg amqp.Delivery) {
+func (call *Call) ok(msg amqp.Delivery) bool {
 	call.mutex.Lock()
 	defer call.mutex.Unlock()
 
+	if call.done {
+		return false
+	}
+
+	call.pool.delete(call.Publishing().Message.CorrelationId)
+	call.done = true
 	call.error = nil
 	call.delivery = msg
 	call.doneCh <- call
+
+	return true
 }

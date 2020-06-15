@@ -15,11 +15,11 @@ func newPool() *pool {
 	}
 }
 
-func (p *pool) set(c *Call) {
+func (p *pool) set(call *Call) {
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
-	p.calls[c.Publishing.Message.CorrelationId] = c
+	p.calls[call.Publishing().Message.CorrelationId] = call
 }
 
 func (p *pool) fetch(corrID string) (*Call, bool) {
