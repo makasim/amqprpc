@@ -14,24 +14,20 @@ import (
 )
 
 func main() {
-	// Init connection properly. For more details visit amqpextra package repository.
-	var conn *amqpextra.Connection
+	conn := amqpextra.Dial([]string{"amqp://guest:guest@rabbitmq:5672/amqprpc"})
 
-	// In some cases you might want to provide different connections for consumer and publisher.
 	client, err := amqprpc.New(conn, conn)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer client.Close()
 
-	// Do RPC
 	call := client.Go(amqpextra.Publishing{
 		Key: "a_queue",
 		Message: amqp.Publishing{
 			Body: []byte(`Have you heard the news?`),
 		},
 	}, make(chan *amqprpc.Call, 1))
-	defer call.Cancel()
 
 	select {
 	case <-call.Done():
@@ -45,7 +41,8 @@ func main() {
 		log.Print(string(rpl.Body))
 
 	case <-time.NewTimer(time.Second).C:
-		// timeout
+		call.Cancel()
 	}
 }
+
 ```
