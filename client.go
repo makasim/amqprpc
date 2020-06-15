@@ -154,7 +154,7 @@ func (client *Client) Close() error {
 	select {
 	case <-client.publisherClosedCh:
 	case <-shutdownPeriodTimer.C:
-		return fmt.Errorf("amqprpc: graceful shutdown period time out")
+		return fmt.Errorf("amqprpc: shutdown grace period time out: publisher not stopped")
 	}
 
 	if client.pool.count() > 0 {
@@ -166,7 +166,14 @@ func (client *Client) Close() error {
 			select {
 			case <-ticker.C:
 			case <-shutdownPeriodTimer.C:
-				break loop
+				client.cancelFunc()
+				client.consumer.Close()
+				<-client.consumerClosedCh
+
+				client.consumerConn.Close()
+				client.publisherConn.Close()
+
+				return fmt.Errorf("amqprpc: shutdown grace period time out: some calls have not been done")
 			}
 
 			if client.pool.count() == 0 {
@@ -180,7 +187,7 @@ func (client *Client) Close() error {
 	select {
 	case <-client.consumerClosedCh:
 	case <-shutdownPeriodTimer.C:
-		return fmt.Errorf("amqprpc: graceful shutdown period time out")
+		return fmt.Errorf("amqprpc: shutdown grace period time out: consumer not stopped")
 	}
 
 	client.consumerConn.Close()

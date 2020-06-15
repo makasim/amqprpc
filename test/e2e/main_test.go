@@ -232,3 +232,31 @@ func TestCancelBeforeReply(t *testing.T) {
 
 	require.NoError(t, client.Close())
 }
+
+func TestShutdownGracePeriodEnded(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	rpcQueue := rabbitmq.UniqueQueue()
+
+	consumerConn := amqpextra.Dial([]string{AMQP_DSN})
+	defer consumerConn.Close()
+	publisherConn := amqpextra.Dial([]string{AMQP_DSN})
+	defer publisherConn.Close()
+
+	client, err := amqprpc.New(
+		publisherConn,
+		consumerConn,
+		amqprpc.WithShutdownPeriod(time.Second),
+	)
+	require.NoError(t, err)
+
+	client.Go(amqpextra.Publishing{
+		Key:       rpcQueue,
+		WaitReady: true,
+		Message: amqp.Publishing{
+			Body: []byte("hello!"),
+		},
+	}, make(chan *amqprpc.Call, 1))
+
+	require.EqualError(t, client.Close(), "amqprpc: shutdown grace period time out: some calls have not been done")
+}
