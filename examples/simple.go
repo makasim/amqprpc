@@ -15,15 +15,7 @@ func main() {
 	var conn *amqpextra.Connection
 
 	// In some cases you might want to provide different connections for consumer and publisher.
-	client, err := amqprpc.New(
-		conn,
-		conn,
-		// add some options
-		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
-			Name:    "custom_reply_queue",
-			Declare: true,
-		}),
-	)
+	client, err := amqprpc.New(conn, conn)
 	if err != nil {
 		log.Fatal(err)
 	}
