@@ -5,7 +5,7 @@ import (
 )
 
 type pool struct {
-	lock  sync.Mutex
+	mux   sync.Mutex
 	calls map[string]*Call
 }
 
@@ -16,15 +16,15 @@ func newPool() *pool {
 }
 
 func (p *pool) set(call *Call) {
-	p.lock.Lock()
-	defer p.lock.Unlock()
+	p.mux.Lock()
+	defer p.mux.Unlock()
 
 	p.calls[call.Publishing().Message.CorrelationId] = call
 }
 
 func (p *pool) fetch(corrID string) (*Call, bool) {
-	p.lock.Lock()
-	defer p.lock.Unlock()
+	p.mux.Lock()
+	defer p.mux.Unlock()
 
 	c, ok := p.calls[corrID]
 	if !ok {
@@ -37,15 +37,15 @@ func (p *pool) fetch(corrID string) (*Call, bool) {
 }
 
 func (p *pool) delete(corrID string) {
-	p.lock.Lock()
-	defer p.lock.Unlock()
+	p.mux.Lock()
+	defer p.mux.Unlock()
 
 	delete(p.calls, corrID)
 }
 
 func (p *pool) count() int {
-	p.lock.Lock()
-	defer p.lock.Unlock()
+	p.mux.Lock()
+	defer p.mux.Unlock()
 
 	return len(p.calls)
 }

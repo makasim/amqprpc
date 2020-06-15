@@ -1,0 +1,20 @@
+version: '3.7'
+
+services:
+  amqprpc-e2e-test:
+    build: { context: "../..", dockerfile: ./test/e2e_env/Dockerfile }
+    entrypoint: [ "./test/e2e_env/entrypoint.sh", "go", "test", "-mod=vendor", "-race", "-count=1", "-v", "./test/e2e/..."]
+    working_dir: "/amqprpc"
+    restart: "no"
+    volumes:
+      - "../../:/amqprpc"
+    depends_on:
+      - rabbitmq
+
+  rabbitmq:
+    image: "rabbitmq:3.8.0-management"
+    restart: "unless-stopped"
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+      - RABBITMQ_DEFAULT_VHOST=amqprpc

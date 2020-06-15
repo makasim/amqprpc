@@ -38,14 +38,13 @@ type Client struct {
 	publisherClosedCh chan struct{}
 	publisher         *amqpextra.Publisher
 
-	mutex    sync.Mutex
-	closing  bool
-	shutdown bool
+	mux     sync.Mutex
+	closing bool
 }
 
 func New(
-	consumerConn *amqpextra.Connection,
 	publisherConn *amqpextra.Connection,
+	consumerConn *amqpextra.Connection,
 	opts ...Option,
 ) (*Client, error) {
 	client := &Client{
@@ -89,10 +88,8 @@ func New(
 		ctx, cancelFunc := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancelFunc()
 
-		q, err := amqpextra.TempQueue(ctx, client.consumerConn)
+		q, err := amqpextra.DeclareTempQueue(ctx, client.consumerConn)
 		if err != nil {
-			client.mutex.Unlock()
-
 			return nil, fmt.Errorf("amqprpc: %w", err)
 		}
 
@@ -127,7 +124,7 @@ func New(
 }
 
 func (client *Client) Go(msg amqpextra.Publishing, done chan *Call) *Call {
-	call := newCall(msg, done, client.consumerOpt.AutoAck)
+	call := newCall(msg, done, client.pool, client.consumerOpt.AutoAck)
 	client.send(call)
 
 	return call
@@ -139,16 +136,16 @@ func (client *Client) Call(msg amqpextra.Publishing) (amqp.Delivery, error) {
 }
 
 func (client *Client) Close() error {
-	client.mutex.Lock()
+	client.mux.Lock()
 
 	if client.closing {
-		client.mutex.Unlock()
+		client.mux.Unlock()
 
 		return ErrShutdown
 	}
 
 	client.closing = true
-	client.mutex.Unlock()
+	client.mux.Unlock()
 
 	shutdownPeriodTimer := time.NewTimer(client.shutdownPeriodOpt)
 	defer shutdownPeriodTimer.Stop()
@@ -164,19 +161,21 @@ func (client *Client) Close() error {
 		ticker := time.NewTicker(time.Millisecond * 200)
 		defer ticker.Stop()
 
+	loop:
 		for {
 			select {
 			case <-ticker.C:
 			case <-shutdownPeriodTimer.C:
-				break
+				break loop
 			}
 
 			if client.pool.count() == 0 {
-				break
+				break loop
 			}
 		}
 	}
 
+	client.cancelFunc()
 	client.consumer.Close()
 	select {
 	case <-client.consumerClosedCh:
@@ -191,14 +190,14 @@ func (client *Client) Close() error {
 }
 
 func (client *Client) send(call *Call) {
-	client.mutex.Lock()
+	client.mux.Lock()
 	if client.closing {
-		client.mutex.Unlock()
+		client.mux.Unlock()
 		call.errored(ErrShutdown)
 		return
 	}
 
-	client.mutex.Unlock()
+	client.mux.Unlock()
 
 	call.publishing.Message.CorrelationId = uuid.New().String()
 	call.publishing.Message.ReplyTo = client.replyQueueOpt.Name

@@ -24,7 +24,7 @@ type Call struct {
 	pool *pool
 }
 
-func newCall(msg amqpextra.Publishing, doneCh chan *Call, autoAck bool) *Call {
+func newCall(msg amqpextra.Publishing, doneCh chan *Call, pool *pool, autoAck bool) *Call {
 	if doneCh == nil {
 		doneCh = make(chan *Call, 1)
 	} else {
@@ -37,6 +37,7 @@ func newCall(msg amqpextra.Publishing, doneCh chan *Call, autoAck bool) *Call {
 		AutoAck:    autoAck,
 		publishing: msg,
 		doneCh:     doneCh,
+		pool:       pool,
 	}
 }
 
@@ -47,7 +48,6 @@ func (call *Call) Publishing() amqpextra.Publishing {
 func (call *Call) Delivery() (amqp.Delivery, error) {
 	call.mutex.Lock()
 	defer call.mutex.Unlock()
-
 	if !call.done {
 		return amqp.Delivery{}, ErrNotDone
 	}
