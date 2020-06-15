@@ -1,5 +1,15 @@
 # Golang AMQP RPC Client
 
+Features:
+
+* Protocol agnostic RPC Client over AMQP.
+* Can simultaneity talk to multiple servers.
+* Call cancellation.
+* Buffer multiple replies in a channel.
+* Client close method wait for calls in flight.
+
+Example:
+
 ```go
 package main
 
