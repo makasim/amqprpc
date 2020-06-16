@@ -1,6 +1,7 @@
 package amqprpc
 
 import (
+	"errors"
 	"sync"
 
 	"log"
@@ -8,6 +9,8 @@ import (
 	"github.com/makasim/amqpextra"
 	"github.com/streadway/amqp"
 )
+
+var Closed = errors.New("amqprpc: call closed")
 
 type Call struct {
 	AutoAck bool
@@ -59,7 +62,7 @@ func (call *Call) Done() <-chan *Call {
 	return call.doneCh
 }
 
-func (call *Call) Cancel() {
+func (call *Call) Close() {
 	call.mutex.Lock()
 	defer call.mutex.Unlock()
 
@@ -69,7 +72,7 @@ func (call *Call) Cancel() {
 
 	call.pool.delete(call.Publishing().Message.CorrelationId)
 	call.done = true
-	call.error = Canceled
+	call.error = Closed
 
 	// drain ok channel
 	for {

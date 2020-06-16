@@ -38,6 +38,6 @@ func main() {
 		log.Print(string(rpl.Body))
 
 	case <-time.NewTimer(time.Second).C:
-		call.Cancel()
+		call.Close()
 	}
 }

@@ -38,6 +38,7 @@ func main() {
 			Body: []byte(`Have you heard the news?`),
 		},
 	}, make(chan *amqprpc.Call, 1))
+    defer call.Close()
 
 	select {
 	case <-call.Done():
@@ -51,7 +52,7 @@ func main() {
 		log.Print(string(rpl.Body))
 
 	case <-time.NewTimer(time.Second).C:
-		call.Cancel()
+        // timeout
 	}
 }
 

@@ -41,7 +41,7 @@ func TestNoConsumerConnection(t *testing.T) {
 	_, err = call.Delivery()
 	require.EqualError(t, err, "amqprpc: call is not done")
 
-	call.Cancel()
+	call.Close()
 	_, err = call.Delivery()
 	require.EqualError(t, err, "amqprpc: call canceled")
 
@@ -73,7 +73,7 @@ func TestNoPublisherConnectionNoWaitReady(t *testing.T) {
 	_, err = call.Delivery()
 	require.EqualError(t, err, `Exception (504) Reason: "channel/connection is not open"`)
 
-	call.Cancel()
+	call.Close()
 	_, err = call.Delivery()
 	require.EqualError(t, err, `Exception (504) Reason: "channel/connection is not open"`)
 
@@ -111,7 +111,7 @@ func TestCallAndReplyTempReplyQueue(t *testing.T) {
 			Body: []byte("hello!"),
 		},
 	}, make(chan *amqprpc.Call, 1))
-	defer call.Cancel()
+	defer call.Close()
 
 	select {
 	case <-call.Done():
@@ -119,12 +119,12 @@ func TestCallAndReplyTempReplyQueue(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(msg.Body))
 
-		call.Cancel()
+		call.Close()
 		msg, err = call.Delivery()
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(msg.Body))
 	case <-time.NewTimer(4 * time.Second).C:
-		call.Cancel()
+		call.Close()
 		t.Errorf("call time out")
 	}
 	require.NoError(t, client.Close())
@@ -171,7 +171,7 @@ func TestCallAndReplyCustomReplyQueue(t *testing.T) {
 			Body: []byte("hello!"),
 		},
 	}, make(chan *amqprpc.Call, 1))
-	defer call.Cancel()
+	defer call.Close()
 
 	select {
 	case <-call.Done():
@@ -179,12 +179,12 @@ func TestCallAndReplyCustomReplyQueue(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(msg.Body))
 
-		call.Cancel()
+		call.Close()
 		msg, err = call.Delivery()
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(msg.Body))
 	case <-time.NewTimer(4 * time.Second).C:
-		call.Cancel()
+		call.Close()
 		t.Errorf("call time out")
 	}
 	require.NoError(t, client.Close())
@@ -219,10 +219,10 @@ func TestCancelBeforeReply(t *testing.T) {
 			Body: []byte("hello!"),
 		},
 	}, make(chan *amqprpc.Call, 1))
-	defer call.Cancel()
+	defer call.Close()
 
 	time.Sleep(time.Millisecond * 500)
-	call.Cancel()
+	call.Close()
 	_, err = call.Delivery()
 	require.EqualError(t, err, "amqprpc: call canceled")
 

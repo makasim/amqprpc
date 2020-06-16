@@ -15,7 +15,6 @@ import (
 	"github.com/streadway/amqp"
 )
 
-var Canceled = errors.New("amqprpc: call canceled")
 var ErrNotDone = errors.New("amqprpc: call is not done")
 var ErrShutdown = errors.New("amqprpc: client is shut down")
 
