@@ -6,7 +6,8 @@ Features:
 * Can simultaneity talk to multiple servers.
 * Call cancellation.
 * Buffer multiple replies in a channel.
-* Client close method wait for calls in flight.
+* Separate publisher\consumer connections.
+* Client close method wait for calls inflight to finish.
 
 Example:
 
