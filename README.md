@@ -38,7 +38,7 @@ func main() {
 			Body: []byte(`Have you heard the news?`),
 		},
 	}, make(chan *amqprpc.Call, 1))
-    defer call.Close()
+	defer call.Close()
 
 	select {
 	case <-call.Done():
