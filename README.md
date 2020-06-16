@@ -25,7 +25,7 @@ import (
 
 func main() {
 	consumerConn := amqpextra.Dial([]string{"amqp://guest:guest@rabbitmq:5672/amqprpc"})
-    publisherConn := amqpextra.Dial([]string{"amqp://guest:guest@rabbitmq:5672/amqprpc"})
+	publisherConn := amqpextra.Dial([]string{"amqp://guest:guest@rabbitmq:5672/amqprpc"})
 
 	client, err := amqprpc.New(publisherConn, consumerConn)
 	if err != nil {
