@@ -7,6 +7,8 @@ Features:
 * Call cancellation.
 * Buffer multiple replies in a channel.
 * Separate publisher\consumer connections.
+* Multiple consumer workers.
+* Auto reconnect.
 * Client close method wait for calls inflight to finish.
 
 Example:
