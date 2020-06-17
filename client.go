@@ -211,11 +211,11 @@ func (client *Client) Close() error {
 }
 
 func (client *Client) send(call *Call) {
-	var consumerUnreadyCh <-chan struct{}
-	var publisherUnreadyCh <-chan struct{}
+	publisherUnreadyCh := client.publisher.Unready()
+	consumerUnreadyCh := client.consumer.Unready()
 	if call.publishing.WaitReady {
-		publisherUnreadyCh = client.publisher.Unready()
-		consumerUnreadyCh = client.consumer.Unready()
+		publisherUnreadyCh = nil
+		consumerUnreadyCh = nil
 	}
 
 	select {
