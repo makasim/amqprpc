@@ -256,8 +256,8 @@ func (client *Client) send(call *Call) {
 	call.publishing.Message.CorrelationId = uuid.New().String()
 	call.publishing.ResultCh = make(chan error, 1)
 	client.pool.set(call)
-
 	client.mux.Unlock()
+
 	client.publisher.Publish(call.publishing)
 
 	select {
