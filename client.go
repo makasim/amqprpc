@@ -18,6 +18,7 @@ import (
 var ErrNotDone = errors.New("amqprpc: call is not done")
 var ErrConsumerUnready = errors.New("amqprpc: consumer unready")
 var ErrPublisherUnready = errors.New("amqprpc: publisher unready")
+var ErrReplyQueueDeleted = errors.New("amqprpc: call reply queue no longer available")
 var ErrShutdown = errors.New("amqprpc: client is shut down")
 
 type Client struct {
@@ -115,7 +116,7 @@ func New(
 					client.mux.Unlock()
 
 					for _, call := range deadCalls {
-						call.errored(ErrConsumerUnready)
+						call.errored(ErrReplyQueueDeleted)
 					}
 				case <-client.consumerClosedCh:
 					return
