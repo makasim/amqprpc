@@ -8,8 +8,8 @@ import (
 )
 
 type ReplyQueue struct {
-	Name       string // user provided queue name, could be empty
-	name       string // user provided queue name, or if name empty: temporary queue name
+	Name       string // user provided queue name. could be empty
+	name       string // user provided queue name, if it is empty: temporary queue name
 	Declare    bool
 	Durable    bool
 	AutoDelete bool
