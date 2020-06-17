@@ -334,6 +334,8 @@ func (client *Client) initConsumer(conn *amqp.Connection) (*amqp.Channel, <-chan
 		}
 
 		client.replyQueueOpt.name = q.Name
+	} else {
+		client.replyQueueOpt.name = client.replyQueueOpt.Name
 	}
 
 	c := client.consumerOpt
