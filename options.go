@@ -8,8 +8,7 @@ import (
 )
 
 type ReplyQueue struct {
-	Name       string // user provided queue name. could be empty
-	name       string // user provided queue name, if it is empty: temporary queue name
+	Name       string
 	Declare    bool
 	Durable    bool
 	AutoDelete bool
@@ -31,31 +30,31 @@ type Option func(client *Client)
 
 func WithReplyQueue(rq ReplyQueue) Option {
 	return func(client *Client) {
-		client.replyQueueOpt = rq
+		client.opts.replyQueue = rq
 	}
 }
 
 func WithConsumer(c Consumer) Option {
 	return func(client *Client) {
-		client.consumerOpt = c
+		client.opts.consumer = c
 	}
 }
 
 func WithPreFetchCount(count int) Option {
 	return func(client *Client) {
-		client.preFetchCountOpt = count
+		client.opts.preFetchCount = count
 	}
 }
 
 func WithWorkerCount(count int) Option {
 	return func(client *Client) {
-		client.workerCountOpt = count
+		client.opts.workerCount = count
 	}
 }
 
 func WithShutdownPeriod(d time.Duration) Option {
 	return func(client *Client) {
-		client.shutdownPeriodOpt = d
+		client.opts.shutdownPeriod = d
 	}
 }
 
