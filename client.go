@@ -16,59 +16,75 @@ import (
 )
 
 var ErrNotDone = errors.New("amqprpc: call is not done")
+var ErrPublisherUnready = errors.New("amqprpc: publisher unready")
+var ErrConsumerUnready = errors.New("amqprpc: consumer unready")
 var ErrShutdown = errors.New("amqprpc: client is shut down")
 
+type options struct {
+	replyQueue     ReplyQueue
+	consumer       Consumer
+	preFetchCount  int
+	workerCount    int
+	shutdownPeriod time.Duration
+}
+
 type Client struct {
-	replyQueueOpt     ReplyQueue
-	consumerOpt       Consumer
-	preFetchCountOpt  int
-	workerCountOpt    int
-	shutdownPeriodOpt time.Duration
+	opts options
 
 	context    context.Context
 	cancelFunc context.CancelFunc
 
-	pool             *pool
-	consumerConn     *amqpextra.Connection
-	consumer         *amqpextra.Consumer
-	consumerClosedCh chan struct{}
+	pool            *pool
+	consumerConn    *amqpextra.Connection
+	consumer        *amqpextra.Consumer
+	consumerCloseCh chan struct{}
 
-	publisherConn     *amqpextra.Connection
-	publisherClosedCh chan struct{}
-	publisher         *amqpextra.Publisher
+	publisherConn    *amqpextra.Connection
+	publisherCloseCh chan struct{}
+	publisher        *amqpextra.Publisher
 
-	mux     sync.Mutex
-	closing bool
+	callCh          chan *Call
+	setReplyQueueCh chan string
+	getReplyQueueCh chan string
+
+	closingMutex sync.Mutex
+	closing      bool
 }
 
 func New(
-	publisherConn *amqpextra.Connection,
+	publisherConn,
 	consumerConn *amqpextra.Connection,
 	opts ...Option,
 ) (*Client, error) {
 	client := &Client{
-		replyQueueOpt: ReplyQueue{
-			Name:       "",
-			Declare:    true,
-			AutoDelete: true,
-			Exclusive:  true,
+		opts: options{
+			replyQueue: ReplyQueue{
+				Name:       "",
+				Declare:    true,
+				AutoDelete: true,
+				Exclusive:  true,
+			},
+			consumer: Consumer{
+				AutoAck:   true,
+				Exclusive: true,
+			},
+			preFetchCount:  10,
+			workerCount:    10,
+			shutdownPeriod: 20 * time.Second,
 		},
-		consumerOpt: Consumer{
-			AutoAck:   true,
-			Exclusive: true,
-		},
-		preFetchCountOpt:  10,
-		workerCountOpt:    10,
-		shutdownPeriodOpt: 20 * time.Second,
 
 		context: context.Background(),
 
-		consumerConn:     consumerConn,
-		consumerClosedCh: make(chan struct{}),
+		consumerConn:    consumerConn,
+		consumerCloseCh: make(chan struct{}),
 
-		publisherConn:     publisherConn,
-		publisherClosedCh: make(chan struct{}),
-		publisher:         publisherConn.Publisher(),
+		publisherConn:    publisherConn,
+		publisherCloseCh: make(chan struct{}),
+		publisher:        publisherConn.Publisher(),
+
+		callCh:          make(chan *Call),
+		setReplyQueueCh: make(chan string),
+		getReplyQueueCh: make(chan string),
 
 		pool: newPool(),
 	}
@@ -78,40 +94,55 @@ func New(
 	}
 
 	client.context, client.cancelFunc = context.WithCancel(client.context)
-
-	if client.replyQueueOpt.Name == "" {
-		if !client.replyQueueOpt.Declare {
-			return nil, fmt.Errorf("amqprpc: either set queue or set declare true")
-		}
-
-		ctx, cancelFunc := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancelFunc()
-
-		q, err := amqpextra.DeclareTempQueue(ctx, client.consumerConn)
-		if err != nil {
-			return nil, fmt.Errorf("amqprpc: %w", err)
-		}
-
-		client.replyQueueOpt.Declare = false
-		client.replyQueueOpt.Name = q.Name
-	}
-
-	client.consumer = client.consumerConn.Consumer(client.replyQueueOpt.Name, amqpextra.WorkerFunc(client.reply))
-	client.consumer.SetWorkerNum(client.workerCountOpt)
+	client.consumer = client.consumerConn.Consumer("", amqpextra.WorkerFunc(client.reply))
+	client.consumer.SetWorkerNum(client.opts.workerCount)
 	client.consumer.SetInitFunc(client.initConsumer)
 	client.consumer.Use(middleware.Recover(), middleware.AckNack())
 
 	go func() {
-		defer close(client.publisherClosedCh)
+		defer close(client.publisherCloseCh)
 
 		client.publisher.Run()
 	}()
 
 	go func() {
-		defer close(client.consumerClosedCh)
+		defer close(client.consumerCloseCh)
 
 		client.consumer.Run()
 	}()
+
+	go func() {
+		for {
+			select {
+			case replyQueue := <-client.setReplyQueueCh:
+			loop:
+				for {
+					select {
+					case client.getReplyQueueCh <- replyQueue:
+					case <-client.consumer.Unready():
+						break loop
+					case <-client.consumerCloseCh:
+						return
+					}
+				}
+			case <-client.consumerCloseCh:
+				return
+			}
+		}
+	}()
+
+	for i := 0; i < 10; i++ {
+		go func() {
+			for {
+				select {
+				case call := <-client.callCh:
+					client.send(call)
+				case <-client.publisherCloseCh:
+					return
+				}
+			}
+		}()
+	}
 
 	go func() {
 		<-client.context.Done()
@@ -123,8 +154,14 @@ func New(
 }
 
 func (client *Client) Go(msg amqpextra.Publishing, done chan *Call) *Call {
-	call := newCall(msg, done, client.pool, client.consumerOpt.AutoAck)
-	client.send(call)
+	call := newCall(msg, done, client.pool, client.opts.consumer.AutoAck)
+
+	select {
+	case <-client.publisherCloseCh:
+		call.errored(ErrShutdown)
+	default:
+		client.callCh <- call
+	}
 
 	return call
 }
@@ -135,23 +172,21 @@ func (client *Client) Call(msg amqpextra.Publishing) (amqp.Delivery, error) {
 }
 
 func (client *Client) Close() error {
-	client.mux.Lock()
-
+	client.closingMutex.Lock()
 	if client.closing {
-		client.mux.Unlock()
-
+		client.closingMutex.Unlock()
 		return ErrShutdown
 	}
 
 	client.closing = true
-	client.mux.Unlock()
+	client.closingMutex.Unlock()
 
-	shutdownPeriodTimer := time.NewTimer(client.shutdownPeriodOpt)
+	shutdownPeriodTimer := time.NewTimer(client.opts.shutdownPeriod)
 	defer shutdownPeriodTimer.Stop()
 
 	client.publisher.Close()
 	select {
-	case <-client.publisherClosedCh:
+	case <-client.publisherCloseCh:
 	case <-shutdownPeriodTimer.C:
 		return fmt.Errorf("amqprpc: shutdown grace period time out: publisher not stopped")
 	}
@@ -164,27 +199,25 @@ func (client *Client) Close() error {
 		for {
 			select {
 			case <-ticker.C:
+				if client.pool.count() == 0 {
+					break loop
+				}
 			case <-shutdownPeriodTimer.C:
 				client.cancelFunc()
 				client.consumer.Close()
-				<-client.consumerClosedCh
+				<-client.consumerCloseCh
 
 				client.consumerConn.Close()
 				client.publisherConn.Close()
 
 				return fmt.Errorf("amqprpc: shutdown grace period time out: some calls have not been done")
 			}
-
-			if client.pool.count() == 0 {
-				break loop
-			}
 		}
 	}
 
-	client.cancelFunc()
 	client.consumer.Close()
 	select {
-	case <-client.consumerClosedCh:
+	case <-client.consumerCloseCh:
 	case <-shutdownPeriodTimer.C:
 		return fmt.Errorf("amqprpc: shutdown grace period time out: consumer not stopped")
 	}
@@ -192,29 +225,60 @@ func (client *Client) Close() error {
 	client.consumerConn.Close()
 	client.publisherConn.Close()
 
+	client.cancelFunc()
+
 	return nil
 }
 
 func (client *Client) send(call *Call) {
-	client.mux.Lock()
-	if client.closing {
-		client.mux.Unlock()
-		call.errored(ErrShutdown)
-		return
+	publisherUnreadyCh := client.publisher.Unready()
+	consumerUnreadyCh := client.consumer.Unready()
+	if call.publishing.WaitReady {
+		publisherUnreadyCh = nil
+		consumerUnreadyCh = nil
 	}
 
-	client.mux.Unlock()
+	if call.publishing.Context == nil {
+		call.publishing.Context = context.Background()
+	}
 
-	call.publishing.Message.CorrelationId = uuid.New().String()
-	call.publishing.Message.ReplyTo = client.replyQueueOpt.Name
-	call.publishing.ResultCh = make(chan error, 1)
-	client.pool.set(call)
+	select {
+	case replyQueue := <-client.getReplyQueueCh:
+		call.publishing.Message.ReplyTo = replyQueue
+		call.publishing.Message.CorrelationId = uuid.New().String()
+		call.publishing.ResultCh = make(chan error, 1)
+		client.pool.set(call)
 
-	client.publisher.Publish(call.publishing)
+		client.publisher.Publish(call.publishing)
 
-	if err := <-call.publishing.ResultCh; err != nil {
-		client.pool.delete(call.publishing.Message.CorrelationId)
-		call.errored(err)
+		select {
+		case err := <-call.publishing.ResultCh:
+			if err != nil {
+				call.errored(err)
+			}
+
+			return
+		case <-call.publishing.Context.Done():
+			call.errored(call.publishing.Context.Err())
+			return
+		case <-client.publisherCloseCh:
+			call.errored(ErrShutdown)
+			return
+		}
+	// noinspection GoNilness
+	case <-consumerUnreadyCh:
+		call.errored(ErrConsumerUnready)
+		return
+	// noinspection GoNilness
+	case <-publisherUnreadyCh:
+		call.errored(ErrPublisherUnready)
+		return
+	case <-call.publishing.Context.Done():
+		call.errored(call.publishing.Context.Err())
+		return
+	case <-client.publisherCloseCh:
+		call.errored(ErrShutdown)
+		return
 	}
 }
 
@@ -228,11 +292,17 @@ func (client *Client) reply(_ context.Context, msg amqp.Delivery) interface{} {
 		return middleware.Nack
 	}
 
-	if !call.ok(msg) {
+	select {
+	case <-call.publishing.Context.Done():
+		call.errored(call.publishing.Context.Err())
 		return middleware.Nack
-	}
+	default:
+		if !call.ok(msg) {
+			return middleware.Nack
+		}
 
-	return nil
+		return nil
+	}
 }
 
 func (client *Client) initConsumer(conn *amqp.Connection) (*amqp.Channel, <-chan amqp.Delivery, error) {
@@ -241,16 +311,33 @@ func (client *Client) initConsumer(conn *amqp.Connection) (*amqp.Channel, <-chan
 		return nil, nil, err
 	}
 
-	err = ch.Qos(client.preFetchCountOpt, 0, false)
+	err = ch.Qos(client.opts.preFetchCount, 0, false)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	queueName := client.replyQueueOpt.Name
-	if client.replyQueueOpt.Declare {
-		rq := client.replyQueueOpt
+	var replyQueue string
+	switch {
+	case client.opts.replyQueue.Name == "":
+		rq := client.opts.replyQueue
 
-		q, err := ch.QueueDeclare(
+		q, queueDeclareErr := ch.QueueDeclare(
+			"",
+			false,
+			true,
+			true,
+			rq.NoWait,
+			rq.Args,
+		)
+		if queueDeclareErr != nil {
+			return nil, nil, queueDeclareErr
+		}
+
+		replyQueue = q.Name
+	case client.opts.replyQueue.Declare:
+		rq := client.opts.replyQueue
+
+		q, queueDeclareErr := ch.QueueDeclare(
 			rq.Name,
 			rq.Durable,
 			rq.AutoDelete,
@@ -258,16 +345,18 @@ func (client *Client) initConsumer(conn *amqp.Connection) (*amqp.Channel, <-chan
 			rq.NoWait,
 			rq.Args,
 		)
-		if err != nil {
-			return nil, nil, err
+		if queueDeclareErr != nil {
+			return nil, nil, queueDeclareErr
 		}
 
-		queueName = q.Name
+		replyQueue = q.Name
+	default:
+		replyQueue = client.opts.replyQueue.Name
 	}
 
-	c := client.consumerOpt
+	c := client.opts.consumer
 	msgCh, err := ch.Consume(
-		queueName,
+		replyQueue,
 		c.Tag,
 		c.AutoAck,
 		c.Exclusive,
@@ -277,6 +366,12 @@ func (client *Client) initConsumer(conn *amqp.Connection) (*amqp.Channel, <-chan
 	)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	select {
+	case client.setReplyQueueCh <- replyQueue:
+	case <-client.publisherCloseCh:
+		return nil, nil, ErrShutdown
 	}
 
 	return ch, msgCh, nil

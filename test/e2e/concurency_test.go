@@ -17,11 +17,11 @@ func TestSendManyOneByOne(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	rpcQueue := rabbitmq.UniqueQueue()
-	defer rabbitmq.RunEchoServer(AMQP_DSN, rpcQueue)()
+	defer rabbitmq.RunEchoServer(AMQPDSN, rpcQueue)()
 
-	consumerConn := amqpextra.Dial([]string{AMQP_DSN})
+	consumerConn := amqpextra.Dial([]string{AMQPDSN})
 	defer consumerConn.Close()
-	publisherConn := amqpextra.Dial([]string{AMQP_DSN})
+	publisherConn := amqpextra.Dial([]string{AMQPDSN})
 	defer publisherConn.Close()
 
 	client, err := amqprpc.New(
@@ -68,11 +68,11 @@ func TestSendManyConcurrently(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	rpcQueue := rabbitmq.UniqueQueue()
-	defer rabbitmq.RunEchoServer(AMQP_DSN, rpcQueue)()
+	defer rabbitmq.RunEchoServer(AMQPDSN, rpcQueue)()
 
-	consumerConn := amqpextra.Dial([]string{AMQP_DSN})
+	consumerConn := amqpextra.Dial([]string{AMQPDSN})
 	defer consumerConn.Close()
-	publisherConn := amqpextra.Dial([]string{AMQP_DSN})
+	publisherConn := amqpextra.Dial([]string{AMQPDSN})
 	defer publisherConn.Close()
 
 	client, err := amqprpc.New(
