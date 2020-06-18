@@ -4,23 +4,20 @@ import (
 	"errors"
 	"sync"
 
-	"log"
-
 	"github.com/makasim/amqpextra"
 	"github.com/streadway/amqp"
 )
 
-var Closed = errors.New("amqprpc: call closed")
+var ErrClosed = errors.New("amqprpc: call closed")
 
 type Call struct {
 	AutoAck bool
-
-	mutex sync.Mutex
 
 	publishing amqpextra.Publishing
 	delivery   amqp.Delivery
 	error      error
 
+	mux    sync.Mutex
 	doneCh chan *Call
 	done   bool
 
@@ -30,10 +27,8 @@ type Call struct {
 func newCall(msg amqpextra.Publishing, doneCh chan *Call, pool *pool, autoAck bool) *Call {
 	if doneCh == nil {
 		doneCh = make(chan *Call, 1)
-	} else {
-		if cap(doneCh) == 0 {
-			log.Panic("amqprpc: ok channel is unbuffered")
-		}
+	} else if cap(doneCh) == 0 {
+		panic("amqprpc: ok channel is unbuffered")
 	}
 
 	return &Call{
@@ -45,12 +40,15 @@ func newCall(msg amqpextra.Publishing, doneCh chan *Call, pool *pool, autoAck bo
 }
 
 func (call *Call) Publishing() amqpextra.Publishing {
+	call.mux.Lock()
+	defer call.mux.Unlock()
+
 	return call.publishing
 }
 
 func (call *Call) Delivery() (amqp.Delivery, error) {
-	call.mutex.Lock()
-	defer call.mutex.Unlock()
+	call.mux.Lock()
+	defer call.mux.Unlock()
 	if !call.done {
 		return amqp.Delivery{}, ErrNotDone
 	}
@@ -63,54 +61,57 @@ func (call *Call) Done() <-chan *Call {
 }
 
 func (call *Call) Close() {
-	call.mutex.Lock()
-	defer call.mutex.Unlock()
-
+	call.mux.Lock()
 	if call.done {
+		call.mux.Unlock()
 		return
 	}
 
-	call.pool.delete(call.Publishing().Message.CorrelationId)
-	call.done = true
-	call.error = Closed
+	corrID := call.publishing.Message.CorrelationId
 
-	// drain ok channel
-	for {
-		select {
-		case <-call.Done():
-		default:
-			return
-		}
-	}
+	call.done = true
+	call.error = ErrClosed
+	call.delivery = amqp.Delivery{}
+	call.doneCh <- call
+	call.mux.Unlock()
+
+	call.pool.delete(corrID)
 }
 
 func (call *Call) errored(err error) {
-	call.mutex.Lock()
-	defer call.mutex.Unlock()
-
+	call.mux.Lock()
 	if call.done {
+		call.mux.Unlock()
 		return
 	}
 
-	call.pool.delete(call.Publishing().Message.CorrelationId)
+	corrID := call.publishing.Message.CorrelationId
+
 	call.done = true
 	call.error = err
+	call.delivery = amqp.Delivery{}
 	call.doneCh <- call
+	call.mux.Unlock()
+
+	call.pool.delete(corrID)
 }
 
 func (call *Call) ok(msg amqp.Delivery) bool {
-	call.mutex.Lock()
-	defer call.mutex.Unlock()
-
+	call.mux.Lock()
 	if call.done {
+		call.mux.Unlock()
 		return false
 	}
 
-	call.pool.delete(call.Publishing().Message.CorrelationId)
+	corrID := call.publishing.Message.CorrelationId
+
 	call.done = true
 	call.error = nil
 	call.delivery = msg
 	call.doneCh <- call
+	call.mux.Unlock()
+
+	call.pool.delete(corrID)
 
 	return true
 }

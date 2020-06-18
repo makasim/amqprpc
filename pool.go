@@ -22,16 +22,6 @@ func (p *pool) set(call *Call) {
 	p.calls[call.Publishing().Message.CorrelationId] = call
 }
 
-func (p *pool) reset() map[string]*Call {
-	p.mux.Lock()
-	defer p.mux.Unlock()
-
-	calls := p.calls
-	p.calls = make(map[string]*Call)
-
-	return calls
-}
-
 func (p *pool) fetch(corrID string) (*Call, bool) {
 	p.mux.Lock()
 	defer p.mux.Unlock()

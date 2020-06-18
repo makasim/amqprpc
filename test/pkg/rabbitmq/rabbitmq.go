@@ -17,17 +17,14 @@ func UniqueQueue() string {
 	return fmt.Sprintf("rpc_server_%d", time.Now().UnixNano())
 }
 
-func RunEchoServer(dsn string, queue string) func() {
+func RunEchoServer(dsn, queue string) func() {
 	conn := amqpextra.Dial([]string{dsn})
-	// conn.SetLogger(amqpextra.LoggerFunc(func(format string, v ...interface{}) {
-	// 	log.Printf(format, v...)
-	// }))
 
 	ctx, cancelFunc := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelFunc()
 	if _, err := amqpextra.DeclareQueue(ctx, conn, queue, false, true, false, false, amqp.Table{}); err != nil {
 		log.Fatal(err)
 	}
+	defer cancelFunc()
 
 	publisher := conn.Publisher()
 	publisher.Start()
@@ -61,17 +58,14 @@ func RunEchoServer(dsn string, queue string) func() {
 	}
 }
 
-func RunSecondSleepServer(dsn string, queue string) func() {
+func RunSecondSleepServer(dsn, queue string) func() {
 	conn := amqpextra.Dial([]string{dsn})
-	// conn.SetLogger(amqpextra.LoggerFunc(func(format string, v ...interface{}) {
-	// 	log.Printf(format, v...)
-	// }))
 
 	ctx, cancelFunc := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelFunc()
 	if _, err := amqpextra.DeclareQueue(ctx, conn, queue, false, true, false, false, amqp.Table{}); err != nil {
 		log.Fatal(err)
 	}
+	defer cancelFunc()
 
 	publisher := conn.Publisher()
 	publisher.Start()

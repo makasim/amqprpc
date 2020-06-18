@@ -43,6 +43,7 @@ type Client struct {
 	publisherCloseCh chan struct{}
 	publisher        *amqpextra.Publisher
 
+	callCh          chan *Call
 	setReplyQueueCh chan string
 	getReplyQueueCh chan string
 
@@ -51,7 +52,7 @@ type Client struct {
 }
 
 func New(
-	publisherConn *amqpextra.Connection,
+	publisherConn,
 	consumerConn *amqpextra.Connection,
 	opts ...Option,
 ) (*Client, error) {
@@ -81,6 +82,7 @@ func New(
 		publisherCloseCh: make(chan struct{}),
 		publisher:        publisherConn.Publisher(),
 
+		callCh:          make(chan *Call),
 		setReplyQueueCh: make(chan string),
 		getReplyQueueCh: make(chan string),
 
@@ -129,6 +131,19 @@ func New(
 		}
 	}()
 
+	for i := 0; i < 10; i++ {
+		go func() {
+			for {
+				select {
+				case call := <-client.callCh:
+					client.send(call)
+				case <-client.publisherCloseCh:
+					return
+				}
+			}
+		}()
+	}
+
 	go func() {
 		<-client.context.Done()
 
@@ -140,7 +155,13 @@ func New(
 
 func (client *Client) Go(msg amqpextra.Publishing, done chan *Call) *Call {
 	call := newCall(msg, done, client.pool, client.opts.consumer.AutoAck)
-	client.send(call)
+
+	select {
+	case <-client.publisherCloseCh:
+		call.errored(ErrShutdown)
+	default:
+		client.callCh <- call
+	}
 
 	return call
 }
@@ -178,6 +199,9 @@ func (client *Client) Close() error {
 		for {
 			select {
 			case <-ticker.C:
+				if client.pool.count() == 0 {
+					break loop
+				}
 			case <-shutdownPeriodTimer.C:
 				client.cancelFunc()
 				client.consumer.Close()
@@ -187,10 +211,6 @@ func (client *Client) Close() error {
 				client.publisherConn.Close()
 
 				return fmt.Errorf("amqprpc: shutdown grace period time out: some calls have not been done")
-			}
-
-			if client.pool.count() == 0 {
-				break loop
 			}
 		}
 	}
@@ -218,6 +238,10 @@ func (client *Client) send(call *Call) {
 		consumerUnreadyCh = nil
 	}
 
+	if call.publishing.Context == nil {
+		call.publishing.Context = context.Background()
+	}
+
 	select {
 	case replyQueue := <-client.getReplyQueueCh:
 		call.publishing.Message.ReplyTo = replyQueue
@@ -230,24 +254,27 @@ func (client *Client) send(call *Call) {
 		select {
 		case err := <-call.publishing.ResultCh:
 			if err != nil {
-				client.pool.delete(call.publishing.Message.CorrelationId)
 				call.errored(err)
 			}
 
+			return
+		case <-call.publishing.Context.Done():
+			call.errored(call.publishing.Context.Err())
 			return
 		case <-client.publisherCloseCh:
 			call.errored(ErrShutdown)
 			return
 		}
-	//noinspection GoNilness
+	// noinspection GoNilness
 	case <-consumerUnreadyCh:
 		call.errored(ErrConsumerUnready)
 		return
-	//noinspection GoNilness
+	// noinspection GoNilness
 	case <-publisherUnreadyCh:
 		call.errored(ErrPublisherUnready)
 		return
-	case <-call.doneCh:
+	case <-call.publishing.Context.Done():
+		call.errored(call.publishing.Context.Err())
 		return
 	case <-client.publisherCloseCh:
 		call.errored(ErrShutdown)
@@ -265,11 +292,17 @@ func (client *Client) reply(_ context.Context, msg amqp.Delivery) interface{} {
 		return middleware.Nack
 	}
 
-	if !call.ok(msg) {
+	select {
+	case <-call.publishing.Context.Done():
+		call.errored(call.publishing.Context.Err())
 		return middleware.Nack
-	}
+	default:
+		if !call.ok(msg) {
+			return middleware.Nack
+		}
 
-	return nil
+		return nil
+	}
 }
 
 func (client *Client) initConsumer(conn *amqp.Connection) (*amqp.Channel, <-chan amqp.Delivery, error) {
@@ -284,10 +317,11 @@ func (client *Client) initConsumer(conn *amqp.Connection) (*amqp.Channel, <-chan
 	}
 
 	var replyQueue string
-	if client.opts.replyQueue.Name == "" {
+	switch {
+	case client.opts.replyQueue.Name == "":
 		rq := client.opts.replyQueue
 
-		q, err := ch.QueueDeclare(
+		q, queueDeclareErr := ch.QueueDeclare(
 			"",
 			false,
 			true,
@@ -295,15 +329,15 @@ func (client *Client) initConsumer(conn *amqp.Connection) (*amqp.Channel, <-chan
 			rq.NoWait,
 			rq.Args,
 		)
-		if err != nil {
-			return nil, nil, err
+		if queueDeclareErr != nil {
+			return nil, nil, queueDeclareErr
 		}
 
 		replyQueue = q.Name
-	} else if client.opts.replyQueue.Declare {
+	case client.opts.replyQueue.Declare:
 		rq := client.opts.replyQueue
 
-		q, err := ch.QueueDeclare(
+		q, queueDeclareErr := ch.QueueDeclare(
 			rq.Name,
 			rq.Durable,
 			rq.AutoDelete,
@@ -311,12 +345,12 @@ func (client *Client) initConsumer(conn *amqp.Connection) (*amqp.Channel, <-chan
 			rq.NoWait,
 			rq.Args,
 		)
-		if err != nil {
-			return nil, nil, err
+		if queueDeclareErr != nil {
+			return nil, nil, queueDeclareErr
 		}
 
 		replyQueue = q.Name
-	} else {
+	default:
 		replyQueue = client.opts.replyQueue.Name
 	}
 
@@ -334,7 +368,11 @@ func (client *Client) initConsumer(conn *amqp.Connection) (*amqp.Channel, <-chan
 		return nil, nil, err
 	}
 
-	client.setReplyQueueCh <- replyQueue
+	select {
+	case client.setReplyQueueCh <- replyQueue:
+	case <-client.publisherCloseCh:
+		return nil, nil, ErrShutdown
+	}
 
 	return ch, msgCh, nil
 }
