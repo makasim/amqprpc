@@ -3,8 +3,8 @@ github.com/google/uuid v1.1.1/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+
 github.com/kr/pretty v0.1.0/go.mod h1:dAy3ld7l9f0ibDNOQOHHMYYIIbhfbHSm3C4ZsoJORNo=
 github.com/kr/pty v1.1.1/go.mod h1:pFQYn66WHrOpPYNljwOMqo10TkYh1fy3cYio2l3bCsQ=
 github.com/kr/text v0.1.0/go.mod h1:4Jbv+DJW3UT/LiOwJeYQe1efqtUx/iVham/4vfdArNI=
-github.com/makasim/amqpextra v0.14.0 h1:fm8m4v6TMdwnZZ7viNTKdl+sQlUgT4UWXuSB9uVGcgA=
-github.com/makasim/amqpextra v0.14.0/go.mod h1:T3kPpCDBs0F4cwc44SIL+zmfEcGQy9O08/QTq/VB+Ys=
+github.com/makasim/amqpextra v0.14.3 h1:tc47uFSxZFzaDsjxaXNpMXXTkW4ajRb9axwFm2QTsDM=
+github.com/makasim/amqpextra v0.14.3/go.mod h1:T3kPpCDBs0F4cwc44SIL+zmfEcGQy9O08/QTq/VB+Ys=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/streadway/amqp v0.0.0-20190827072141-edfb9018d271/go.mod h1:AZpEONHx3DKn8O/DFsRAY58/XVQiIPMTMB1SddzLXVw=
 github.com/streadway/amqp v1.0.0 h1:kuuDrUJFZL1QYL9hUNuCxNObNzB0bV/ZG5jV3RWAQgo=

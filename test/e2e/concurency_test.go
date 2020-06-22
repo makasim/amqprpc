@@ -17,7 +17,7 @@ func TestSendManyOneByOne(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	rpcQueue := rabbitmq.UniqueQueue()
-	defer rabbitmq.RunEchoServer(AMQPDSN, rpcQueue)()
+	defer rabbitmq.RunEchoServer(AMQPDSN, rpcQueue, true)()
 
 	consumerConn := amqpextra.Dial([]string{AMQPDSN})
 	defer consumerConn.Close()
@@ -48,6 +48,8 @@ func TestSendManyOneByOne(t *testing.T) {
 	}
 
 	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
 	got := 0
 	for {
 		select {
@@ -68,7 +70,7 @@ func TestSendManyConcurrently(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	rpcQueue := rabbitmq.UniqueQueue()
-	defer rabbitmq.RunEchoServer(AMQPDSN, rpcQueue)()
+	defer rabbitmq.RunEchoServer(AMQPDSN, rpcQueue, true)()
 
 	consumerConn := amqpextra.Dial([]string{AMQPDSN})
 	defer consumerConn.Close()
@@ -84,7 +86,6 @@ func TestSendManyConcurrently(t *testing.T) {
 		}),
 	)
 	require.NoError(t, err)
-	defer client.Close()
 
 	calls := make(chan *amqprpc.Call, 2000)
 
@@ -103,6 +104,8 @@ func TestSendManyConcurrently(t *testing.T) {
 	}
 
 	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
 	got := 0
 	for {
 		select {
@@ -117,4 +120,6 @@ func TestSendManyConcurrently(t *testing.T) {
 			}
 		}
 	}
+
+	require.NoError(t, client.Close())
 }
