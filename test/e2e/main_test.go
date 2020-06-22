@@ -1,6 +1,7 @@
 package e2e_test
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/makasim/amqpextra"
@@ -11,8 +12,10 @@ import (
 	"context"
 
 	"github.com/makasim/amqprpc"
+	"github.com/makasim/amqprpc/test/pkg/assertlog"
 	"github.com/makasim/amqprpc/test/pkg/rabbitmq"
 	"github.com/streadway/amqp"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -296,7 +299,7 @@ func TestCallAndReplyTempReplyQueue(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	rpcQueue := rabbitmq.UniqueQueue()
-	defer rabbitmq.RunEchoServer(AMQPDSN, rpcQueue)()
+	defer rabbitmq.RunEchoServer(AMQPDSN, rpcQueue, true)()
 
 	consumerConn := amqpextra.Dial([]string{AMQPDSN})
 	defer consumerConn.Close()
@@ -323,6 +326,9 @@ func TestCallAndReplyTempReplyQueue(t *testing.T) {
 	}, make(chan *amqprpc.Call, 1))
 	defer call.Close()
 
+	timer := time.NewTimer(4 * time.Second)
+	defer timer.Stop()
+
 	select {
 	case <-call.Done():
 		msg, err := call.Delivery()
@@ -333,7 +339,7 @@ func TestCallAndReplyTempReplyQueue(t *testing.T) {
 		msg, err = call.Delivery()
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(msg.Body))
-	case <-time.NewTimer(4 * time.Second).C:
+	case <-timer.C:
 		call.Close()
 		t.Errorf("call time out")
 	}
@@ -344,7 +350,9 @@ func TestCallAndReplyCustomReplyQueue(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	rpcQueue := rabbitmq.UniqueQueue()
-	defer rabbitmq.RunEchoServer(AMQPDSN, rpcQueue)()
+	replyQueue := rabbitmq.UniqueQueue()
+
+	defer rabbitmq.RunEchoServer(AMQPDSN, rpcQueue, true)()
 
 	consumerConn := amqpextra.Dial([]string{AMQPDSN})
 	defer consumerConn.Close()
@@ -354,7 +362,7 @@ func TestCallAndReplyCustomReplyQueue(t *testing.T) {
 	_, err := amqpextra.DeclareQueue(
 		context.Background(),
 		consumerConn,
-		"rpc_reply_queue",
+		replyQueue,
 		false,
 		true,
 		true,
@@ -367,7 +375,7 @@ func TestCallAndReplyCustomReplyQueue(t *testing.T) {
 		publisherConn,
 		consumerConn,
 		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
-			Name:    "rpc_reply_queue",
+			Name:    replyQueue,
 			Declare: false,
 		}),
 	)
@@ -383,6 +391,9 @@ func TestCallAndReplyCustomReplyQueue(t *testing.T) {
 	}, make(chan *amqprpc.Call, 1))
 	defer call.Close()
 
+	timer := time.NewTimer(4 * time.Second)
+	defer timer.Stop()
+
 	select {
 	case <-call.Done():
 		msg, err := call.Delivery()
@@ -393,7 +404,7 @@ func TestCallAndReplyCustomReplyQueue(t *testing.T) {
 		msg, err = call.Delivery()
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(msg.Body))
-	case <-time.NewTimer(4 * time.Second).C:
+	case <-timer.C:
 		call.Close()
 		t.Errorf("call time out")
 	}
@@ -404,7 +415,7 @@ func TestCancelBeforeReply(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	rpcQueue := rabbitmq.UniqueQueue()
-	defer rabbitmq.RunSecondSleepServer(AMQPDSN, rpcQueue)()
+	defer rabbitmq.RunSleepServer(AMQPDSN, rpcQueue, time.Second)()
 
 	consumerConn := amqpextra.Dial([]string{AMQPDSN})
 	defer consumerConn.Close()
@@ -476,7 +487,7 @@ func TestSendToClosedClient(t *testing.T) {
 	require.EqualError(t, err, "amqprpc: client is shut down")
 }
 
-func TestShutdownGracePeriodEnded(t *testing.T) {
+func TestShutdownGracePeriodEndedWithAutoDeletedQueue(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	rpcQueue := rabbitmq.UniqueQueue()
@@ -494,7 +505,7 @@ func TestShutdownGracePeriodEnded(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	client.Go(amqpextra.Publishing{
+	call := client.Go(amqpextra.Publishing{
 		Key:       rpcQueue,
 		WaitReady: true,
 		Message: amqp.Publishing{
@@ -504,14 +515,56 @@ func TestShutdownGracePeriodEnded(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	require.EqualError(t, client.Close(), "amqprpc: shutdown grace period time out: some calls have not been done")
+	assert.EqualError(t, client.Close(), "amqprpc: shutdown grace period time out: some calls have not been done")
+
+	<-call.Done()
+	_, err = call.Delivery()
+	assert.Equal(t, amqprpc.ErrShutdown, err)
+}
+
+func TestShutdownGracePeriodEndedWithNoAutoDeleted(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	rpcQueue := rabbitmq.UniqueQueue()
+
+	consumerConn := amqpextra.Dial([]string{AMQPDSN})
+	defer consumerConn.Close()
+
+	publisherConn := amqpextra.Dial([]string{AMQPDSN})
+	defer publisherConn.Close()
+
+	client, err := amqprpc.New(
+		publisherConn,
+		consumerConn,
+		amqprpc.WithShutdownPeriod(time.Second),
+		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
+			Name:    rabbitmq.UniqueQueue(),
+			Declare: true,
+		}),
+	)
+	require.NoError(t, err)
+
+	call := client.Go(amqpextra.Publishing{
+		Key:       rpcQueue,
+		WaitReady: true,
+		Message: amqp.Publishing{
+			Body: []byte("hello!"),
+		},
+	}, make(chan *amqprpc.Call, 1))
+
+	time.Sleep(100 * time.Millisecond)
+
+	assert.EqualError(t, client.Close(), "amqprpc: shutdown grace period time out: some calls have not been done")
+
+	_, err = call.Delivery()
+	assert.Equal(t, amqprpc.ErrShutdown, err)
 }
 
 func TestShutdownWaitForInflight(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	rpcQueue := rabbitmq.UniqueQueue()
-	defer rabbitmq.RunSecondSleepServer(AMQPDSN, rpcQueue)()
+	defer rabbitmq.RunSleepServer(AMQPDSN, rpcQueue, time.Second)()
 
 	consumerConn := amqpextra.Dial([]string{AMQPDSN})
 	defer consumerConn.Close()
@@ -533,5 +586,189 @@ func TestShutdownWaitForInflight(t *testing.T) {
 		},
 	}, make(chan *amqprpc.Call, 1))
 
+	require.NoError(t, client.Close())
+}
+
+func TestErrorReplyQueueHasGoneIfReplyQueueAutoDeleted(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	rpcQueue := rabbitmq.UniqueQueue()
+	replyQueue := fmt.Sprintf("reply-queue-%d", time.Now().UnixNano())
+
+	consumerConnName := fmt.Sprintf("amqprpc-consumer-%d", time.Now().UnixNano())
+	consumerConn := amqpextra.DialConfig([]string{AMQPDSN}, amqp.Config{
+		Properties: amqp.Table{
+			"connection_name": consumerConnName,
+		},
+	})
+	defer consumerConn.Close()
+	publisherConn := amqpextra.Dial([]string{AMQPDSN})
+	defer publisherConn.Close()
+
+	client, err := amqprpc.New(
+		publisherConn,
+		consumerConn,
+		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
+			Name:       replyQueue,
+			AutoDelete: true,
+			Declare:    true,
+		}),
+	)
+	require.NoError(t, err)
+	defer client.Close()
+
+	call := client.Go(amqpextra.Publishing{
+		Key:       rpcQueue,
+		WaitReady: true,
+		Message: amqp.Publishing{
+			Body: []byte("hello!"),
+		},
+	}, make(chan *amqprpc.Call, 1))
+	defer call.Close()
+
+	assertlog.WaitContainsOrFatal(t, rabbitmq.OpenedConns, consumerConnName, time.Second*10)
+	require.True(t, rabbitmq.CloseConn(consumerConnName))
+
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-call.Done():
+		_, err := call.Delivery()
+		require.Equal(t, err, amqprpc.ErrReplyQueueGoneAway)
+
+		call.Close()
+		_, err = call.Delivery()
+		require.Equal(t, err, amqprpc.ErrReplyQueueGoneAway)
+	case <-timer.C:
+		call.Close()
+		t.Errorf("call time out")
+	}
+	require.NoError(t, client.Close())
+}
+
+func TestErrorReplyQueueHasGoneIfTemporaryQueue(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	rpcQueue := rabbitmq.UniqueQueue()
+
+	consumerConnName := fmt.Sprintf("amqprpc-consumer-%d", time.Now().UnixNano())
+	consumerConn := amqpextra.DialConfig([]string{AMQPDSN}, amqp.Config{
+		Properties: amqp.Table{
+			"connection_name": consumerConnName,
+		},
+	})
+	defer consumerConn.Close()
+	publisherConn := amqpextra.Dial([]string{AMQPDSN})
+	defer publisherConn.Close()
+
+	client, err := amqprpc.New(
+		publisherConn,
+		consumerConn,
+	)
+	require.NoError(t, err)
+	defer client.Close()
+
+	call := client.Go(amqpextra.Publishing{
+		Key:       rpcQueue,
+		WaitReady: true,
+		Message: amqp.Publishing{
+			Body: []byte("hello!"),
+		},
+	}, make(chan *amqprpc.Call, 1))
+	defer call.Close()
+
+	assertlog.WaitContainsOrFatal(t, rabbitmq.OpenedConns, consumerConnName, time.Second*10)
+	require.True(t, rabbitmq.CloseConn(consumerConnName))
+
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-call.Done():
+		_, err := call.Delivery()
+		require.Equal(t, err, amqprpc.ErrReplyQueueGoneAway)
+
+		call.Close()
+		_, err = call.Delivery()
+		require.Equal(t, err, amqprpc.ErrReplyQueueGoneAway)
+	case <-timer.C:
+		call.Close()
+		t.Errorf("call time out")
+	}
+	require.NoError(t, client.Close())
+}
+
+func TestCallAndReplyWithNoAutoDeleteQueueAndConsumerLostConnection(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	rpcQueue := rabbitmq.UniqueQueue()
+	replyQueue := rabbitmq.UniqueQueue()
+
+	consumerConnName := fmt.Sprintf("amqprpc-consumer-%d", time.Now().UnixNano())
+	consumerConn := amqpextra.DialConfig([]string{AMQPDSN}, amqp.Config{
+		Properties: amqp.Table{
+			"connection_name": consumerConnName,
+		},
+	})
+	defer consumerConn.Close()
+	publisherConn := amqpextra.Dial([]string{AMQPDSN})
+	defer publisherConn.Close()
+
+	_, err := amqpextra.DeclareQueue(
+		context.Background(),
+		consumerConn,
+		rpcQueue,
+		false,
+		false,
+		false,
+		false,
+		amqp.Table{},
+	)
+	require.NoError(t, err)
+
+	client, err := amqprpc.New(
+		publisherConn,
+		consumerConn,
+		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
+			Name:       replyQueue,
+			Declare:    true,
+			AutoDelete: false,
+			Exclusive:  false,
+		}),
+	)
+	require.NoError(t, err)
+
+	call := client.Go(amqpextra.Publishing{
+		Key:       rpcQueue,
+		WaitReady: true,
+		Message: amqp.Publishing{
+			Body: []byte("hello!"),
+		},
+	}, make(chan *amqprpc.Call, 1))
+	defer call.Close()
+
+	assertlog.WaitContainsOrFatal(t, rabbitmq.OpenedConns, consumerConnName, 10*time.Second)
+	require.True(t, rabbitmq.CloseConn(consumerConnName))
+
+	defer rabbitmq.RunEchoServer(AMQPDSN, rpcQueue, false)()
+
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-call.Done():
+		rpl, err := call.Delivery()
+		require.NoError(t, err)
+		require.Equal(t, "hello!", string(rpl.Body))
+
+		call.Close()
+		_, err = call.Delivery()
+		require.NoError(t, err)
+		require.Equal(t, "hello!", string(rpl.Body))
+	case <-timer.C:
+		call.Close()
+		t.Errorf("call time out")
+	}
 	require.NoError(t, client.Close())
 }

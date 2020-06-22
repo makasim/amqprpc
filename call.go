@@ -17,9 +17,10 @@ type Call struct {
 	delivery   amqp.Delivery
 	error      error
 
-	mux    sync.Mutex
-	doneCh chan *Call
-	done   bool
+	mux     sync.Mutex
+	closeCh chan struct{}
+	doneCh  chan *Call
+	done    bool
 
 	pool *pool
 }
@@ -34,6 +35,7 @@ func newCall(msg amqpextra.Publishing, doneCh chan *Call, pool *pool, autoAck bo
 	return &Call{
 		AutoAck:    autoAck,
 		publishing: msg,
+		closeCh:    make(chan struct{}),
 		doneCh:     doneCh,
 		pool:       pool,
 	}
@@ -60,6 +62,10 @@ func (call *Call) Done() <-chan *Call {
 	return call.doneCh
 }
 
+func (call *Call) Closed() <-chan struct{} {
+	return call.closeCh
+}
+
 func (call *Call) Close() {
 	call.mux.Lock()
 	if call.done {
@@ -73,6 +79,7 @@ func (call *Call) Close() {
 	call.error = ErrClosed
 	call.delivery = amqp.Delivery{}
 	call.doneCh <- call
+	close(call.closeCh)
 	call.mux.Unlock()
 
 	call.pool.delete(corrID)
@@ -91,6 +98,7 @@ func (call *Call) errored(err error) {
 	call.error = err
 	call.delivery = amqp.Delivery{}
 	call.doneCh <- call
+	close(call.closeCh)
 	call.mux.Unlock()
 
 	call.pool.delete(corrID)
@@ -109,6 +117,7 @@ func (call *Call) ok(msg amqp.Delivery) bool {
 	call.error = nil
 	call.delivery = msg
 	call.doneCh <- call
+	close(call.closeCh)
 	call.mux.Unlock()
 
 	call.pool.delete(corrID)
