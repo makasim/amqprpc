@@ -2,10 +2,9 @@ package amqprpc
 
 import (
 	"errors"
-	"sync"
-
-	"github.com/makasim/amqpextra"
+	"github.com/makasim/amqpextra/publisher"
 	"github.com/streadway/amqp"
+	"sync"
 )
 
 var ErrClosed = errors.New("amqprpc: call closed")
@@ -13,7 +12,7 @@ var ErrClosed = errors.New("amqprpc: call closed")
 type Call struct {
 	AutoAck bool
 
-	publishing amqpextra.Publishing
+	message publisher.Message
 	delivery   amqp.Delivery
 	error      error
 
@@ -25,7 +24,7 @@ type Call struct {
 	pool *pool
 }
 
-func newCall(msg amqpextra.Publishing, doneCh chan *Call, pool *pool, autoAck bool) *Call {
+func newCall(msg publisher.Message, doneCh chan *Call, pool *pool, autoAck bool) *Call {
 	if doneCh == nil {
 		doneCh = make(chan *Call, 1)
 	} else if cap(doneCh) == 0 {
@@ -34,18 +33,18 @@ func newCall(msg amqpextra.Publishing, doneCh chan *Call, pool *pool, autoAck bo
 
 	return &Call{
 		AutoAck:    autoAck,
-		publishing: msg,
+		message: msg,
 		closeCh:    make(chan struct{}),
 		doneCh:     doneCh,
 		pool:       pool,
 	}
 }
 
-func (call *Call) Publishing() amqpextra.Publishing {
+func (call *Call) Publishing() publisher.Message {
 	call.mux.Lock()
 	defer call.mux.Unlock()
 
-	return call.publishing
+	return call.message
 }
 
 func (call *Call) Delivery() (amqp.Delivery, error) {
@@ -73,7 +72,7 @@ func (call *Call) Close() {
 		return
 	}
 
-	corrID := call.publishing.Message.CorrelationId
+	corrID := call.message.Publishing.CorrelationId
 
 	call.done = true
 	call.error = ErrClosed
@@ -92,7 +91,7 @@ func (call *Call) errored(err error) {
 		return
 	}
 
-	corrID := call.publishing.Message.CorrelationId
+	corrID := call.message.Publishing.CorrelationId
 
 	call.done = true
 	call.error = err
@@ -111,7 +110,7 @@ func (call *Call) ok(msg amqp.Delivery) bool {
 		return false
 	}
 
-	corrID := call.publishing.Message.CorrelationId
+	corrID := call.message.Publishing.CorrelationId
 
 	call.done = true
 	call.error = nil

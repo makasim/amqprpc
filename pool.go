@@ -19,7 +19,7 @@ func (p *pool) set(call *Call) {
 	p.mux.Lock()
 	defer p.mux.Unlock()
 
-	p.calls[call.Publishing().Message.CorrelationId] = call
+	p.calls[call.Publishing().Publishing.CorrelationId] = call
 }
 
 func (p *pool) fetch(corrID string) (*Call, bool) {
