@@ -19,8 +19,6 @@ import (
 )
 
 var ErrNotDone = errors.New("amqprpc: call is not done")
-var ErrPublisherUnready = errors.New("amqprpc: publisher unready")
-var ErrConsumerUnready = errors.New("amqprpc: consumer unready")
 var ErrReplyQueueGoneAway = errors.New("amqprpc: reply queue has gone away")
 var ErrShutdown = errors.New("amqprpc: client is shut down")
 
@@ -62,43 +60,9 @@ type Client struct {
 	closing      bool
 }
 
-func (o *options) resolveConsumerOptions(h consumer.Handler, readyCh chan consumer.Ready, unreadyCh chan error) []consumer.Option {
-	ops := []consumer.Option{
-		consumer.WithWorker(consumer.NewParallelWorker(o.workerCount)),
-		consumer.WithNotify(readyCh, unreadyCh),
-		consumer.WithQos(o.preFetchCount, false),
-		consumer.WithHandler(h),
-	}
-
-	declare := o.replyQueue.Declare
-	name := o.replyQueue.Name
-
-	if declare && name == "" {
-		ops = append(ops, consumer.WithTmpQueue())
-	}
-
-	if declare && name != "" {
-		ops = append(ops, consumer.WithDeclareQueue(
-			o.replyQueue.Name,
-			o.replyQueue.Durable,
-			o.replyQueue.AutoDelete,
-			o.replyQueue.Exclusive,
-			o.replyQueue.NoWait,
-			o.replyQueue.Args,
-		))
-	}
-
-	if !declare && name != "" {
-		ops = append(ops, consumer.WithQueue(name))
-	}
-
-	return ops
-}
-
 func New(
 	consumerConn,
 	publisherConn <-chan *amqpextra.Connection,
-	handler consumer.Handler,
 	opts ...Option,
 ) (*Client, error) {
 	client := &Client{
@@ -136,8 +100,9 @@ func New(
 		opt(client)
 	}
 
-	handler = middleware.Recover()(handler)
-	handler = middleware.AckNack()(handler)
+	handler := middleware.Recover()(client)
+	handler = middleware.AckNack()(client)
+
 	consumerReadyCh := make(chan consumer.Ready, 1)
 	client.consumerUnreadyCh = make(chan error, 1)
 
@@ -165,13 +130,12 @@ func New(
 
 		for {
 			select {
-			case <-consumerReadyCh:
-				rq := <-client.setReplyQueueCh
+			case rq := <-consumerReadyCh:
 			loop:
 				for {
 					select {
 					case client.replyQueueCh <- replyQueue{
-						name:    rq,
+						name:    rq.Queue,
 						closeCh: closeCh,
 					}:
 					case <-client.consumerUnreadyCh:
@@ -201,6 +165,39 @@ func New(
 	}()
 
 	return client, nil
+}
+
+func (o *options) resolveConsumerOptions(h consumer.Handler, readyCh chan consumer.Ready, unreadyCh chan error) []consumer.Option {
+	ops := []consumer.Option{
+		consumer.WithWorker(consumer.NewParallelWorker(o.workerCount)),
+		consumer.WithNotify(readyCh, unreadyCh),
+		consumer.WithQos(o.preFetchCount, false),
+		consumer.WithHandler(h),
+	}
+
+	declare := o.replyQueue.Declare
+	name := o.replyQueue.Name
+
+	if declare && name == "" {
+		ops = append(ops, consumer.WithTmpQueue())
+	}
+
+	if declare && name != "" {
+		ops = append(ops, consumer.WithDeclareQueue(
+			o.replyQueue.Name,
+			o.replyQueue.Durable,
+			o.replyQueue.AutoDelete,
+			o.replyQueue.Exclusive,
+			o.replyQueue.NoWait,
+			o.replyQueue.Args,
+		))
+	}
+
+	if !declare && name != "" {
+		ops = append(ops, consumer.WithQueue(name))
+	}
+
+	return ops
 }
 
 func (client *Client) Go(msg publisher.Message, done chan *Call) *Call {
@@ -276,18 +273,19 @@ func (client *Client) Close() error {
 }
 
 func (client *Client) send(call *Call) {
-	publisherUnreadyCh := client.publisherUnreadyCh
-	consumerUnreadyCh := client.consumerUnreadyCh
-	// TODO
-	if call.message.WaitReady {
-		publisherUnreadyCh = nil
-		consumerUnreadyCh = nil
+	var (
+		publisherUnreadyCh chan error
+		consumerUnreadyCh  chan error
+	)
+
+	if call.message.ErrOnUnready {
+		publisherUnreadyCh = client.publisherUnreadyCh
+		consumerUnreadyCh = client.consumerUnreadyCh
 	}
 
 	if call.message.Context == nil {
 		call.message.Context = context.Background()
 	}
-
 	select {
 	case replyQueue := <-client.replyQueueCh:
 		resultCh := make(chan error, 1)
@@ -298,7 +296,6 @@ func (client *Client) send(call *Call) {
 		client.pool.set(call)
 
 		client.publisher.Publish(call.message)
-
 		for {
 			select {
 			case err := <-resultCh:
@@ -327,12 +324,12 @@ func (client *Client) send(call *Call) {
 	case <-call.Closed():
 		return
 	// noinspection GoNilness
-	case <-consumerUnreadyCh:
-		call.errored(ErrConsumerUnready)
+	case err := <-consumerUnreadyCh:
+		call.errored(fmt.Errorf("amqprpc: consumer unready: %s", err))
 		return
 	// noinspection GoNilness
-	case <-publisherUnreadyCh:
-		call.errored(ErrPublisherUnready)
+	case err := <-publisherUnreadyCh:
+		call.errored(fmt.Errorf("amqprpc: publisher unready: %s", err))
 		return
 	case <-call.message.Context.Done():
 		call.errored(call.message.Context.Err())
@@ -343,7 +340,7 @@ func (client *Client) send(call *Call) {
 	}
 }
 
-func (client *Client) reply(_ context.Context, msg amqp.Delivery) interface{} {
+func (client *Client) Handle(_ context.Context, msg amqp.Delivery) interface{} {
 	if msg.CorrelationId == "" {
 		return middleware.Nack
 	}

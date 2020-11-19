@@ -40,7 +40,7 @@ func newCall(msg publisher.Message, doneCh chan *Call, pool *pool, autoAck bool)
 	}
 }
 
-func (call *Call) Publishing() publisher.Message {
+func (call *Call) Message() publisher.Message {
 	call.mux.Lock()
 	defer call.mux.Unlock()
 
