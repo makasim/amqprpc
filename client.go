@@ -43,11 +43,11 @@ type Client struct {
 	cancelFunc context.CancelFunc
 
 	pool              *pool
-	consumerConn      <-chan *amqpextra.Connection
+	consumerConnCh    <-chan *amqpextra.Connection
 	consumer          *consumer.Consumer
 	consumerUnreadyCh chan error
 
-	publisherConn      <-chan *amqpextra.Connection
+	publisherConnCh    <-chan *amqpextra.Connection
 	publisher          *publisher.Publisher
 	publisherUnreadyCh chan error
 
@@ -61,8 +61,8 @@ type Client struct {
 }
 
 func New(
-	consumerConn,
-	publisherConn <-chan *amqpextra.Connection,
+	consumerConnCh,
+	publisherConnCh <-chan *amqpextra.Connection,
 	opts ...Option,
 ) (*Client, error) {
 	client := &Client{
@@ -84,9 +84,9 @@ func New(
 
 		context: context.Background(),
 
-		consumerConn: consumerConn,
+		consumerConnCh: consumerConnCh,
 
-		publisherConn: publisherConn,
+		publisherConnCh: publisherConnCh,
 
 		closeCallsCh: make(chan struct{}),
 
@@ -100,24 +100,30 @@ func New(
 		opt(client)
 	}
 
-	handler := middleware.Recover()(client)
-	handler = middleware.AckNack()(client)
+	handler := consumer.Wrap(
+		consumer.HandlerFunc(client.reply),
+		middleware.Recover(),
+		middleware.AckNack(),
+	)
 
 	consumerReadyCh := make(chan consumer.Ready, 1)
 	client.consumerUnreadyCh = make(chan error, 1)
 
 	c, err := amqpextra.NewConsumer(
-		consumerConn,
+		consumerConnCh,
 		client.opts.resolveConsumerOptions(handler, consumerReadyCh, client.consumerUnreadyCh)...)
 	if err != nil {
 		return nil, err
 	}
+
 	client.consumer = c
 
 	publisherReadyCh := make(chan struct{}, 1)
 	client.publisherUnreadyCh = make(chan error, 1)
 
-	pub, err := amqpextra.NewPublisher(publisherConn, publisher.WithNotify(publisherReadyCh, client.publisherUnreadyCh))
+	pub, err := amqpextra.NewPublisher(
+		publisherConnCh,
+		publisher.WithNotify(publisherReadyCh, client.publisherUnreadyCh))
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +155,6 @@ func New(
 			}
 
 			if client.opts.replyQueue.Name == "" || client.opts.replyQueue.AutoDelete {
-				close(closeCh)
 				closeCh = make(chan struct{})
 			}
 		}
@@ -168,18 +173,22 @@ func New(
 }
 
 func (o *options) resolveConsumerOptions(h consumer.Handler, readyCh chan consumer.Ready, unreadyCh chan error) []consumer.Option {
-	ops := []consumer.Option{
-		consumer.WithWorker(consumer.NewParallelWorker(o.workerCount)),
-		consumer.WithNotify(readyCh, unreadyCh),
-		consumer.WithQos(o.preFetchCount, false),
-		consumer.WithHandler(h),
-	}
+	var (
+		ops = []consumer.Option{
+			consumer.WithWorker(consumer.NewParallelWorker(o.workerCount)),
+			consumer.WithNotify(readyCh, unreadyCh),
+			consumer.WithQos(o.preFetchCount, false),
+			consumer.WithHandler(h),
+		}
 
-	declare := o.replyQueue.Declare
-	name := o.replyQueue.Name
+		declare = o.replyQueue.Declare
+		name    = o.replyQueue.Name
+	)
 
 	if declare && name == "" {
 		ops = append(ops, consumer.WithTmpQueue())
+	} else if !declare && name == "" {
+		panic("declare flag or queue name for ReplyQueue must be provided in WithReplyQueue")
 	}
 
 	if declare && name != "" {
@@ -286,6 +295,7 @@ func (client *Client) send(call *Call) {
 	if call.message.Context == nil {
 		call.message.Context = context.Background()
 	}
+
 	select {
 	case replyQueue := <-client.replyQueueCh:
 		resultCh := make(chan error, 1)
@@ -294,8 +304,10 @@ func (client *Client) send(call *Call) {
 		call.message.Publishing.CorrelationId = uuid.New().String()
 		call.message.ResultCh = resultCh
 		client.pool.set(call)
-
-		client.publisher.Publish(call.message)
+		err := client.publisher.Publish(call.message)
+		if err != nil {
+			call.errored(err)
+		}
 		for {
 			select {
 			case err := <-resultCh:
@@ -340,7 +352,7 @@ func (client *Client) send(call *Call) {
 	}
 }
 
-func (client *Client) Handle(_ context.Context, msg amqp.Delivery) interface{} {
+func (client *Client) reply(_ context.Context, msg amqp.Delivery) interface{} {
 	if msg.CorrelationId == "" {
 		return middleware.Nack
 	}
@@ -354,5 +366,5 @@ func (client *Client) Handle(_ context.Context, msg amqp.Delivery) interface{} {
 		return middleware.Nack
 	}
 
-	return nil
+	return middleware.Ack
 }

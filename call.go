@@ -2,9 +2,10 @@ package amqprpc
 
 import (
 	"errors"
+	"sync"
+
 	"github.com/makasim/amqpextra/publisher"
 	"github.com/streadway/amqp"
-	"sync"
 )
 
 var ErrClosed = errors.New("amqprpc: call closed")
@@ -12,9 +13,9 @@ var ErrClosed = errors.New("amqprpc: call closed")
 type Call struct {
 	AutoAck bool
 
-	message publisher.Message
-	delivery   amqp.Delivery
-	error      error
+	message  publisher.Message
+	delivery amqp.Delivery
+	error    error
 
 	mux     sync.Mutex
 	closeCh chan struct{}
@@ -32,11 +33,11 @@ func newCall(msg publisher.Message, doneCh chan *Call, pool *pool, autoAck bool)
 	}
 
 	return &Call{
-		AutoAck:    autoAck,
+		AutoAck: autoAck,
 		message: msg,
-		closeCh:    make(chan struct{}),
-		doneCh:     doneCh,
-		pool:       pool,
+		closeCh: make(chan struct{}),
+		doneCh:  doneCh,
+		pool:    pool,
 	}
 }
 
