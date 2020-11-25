@@ -19,15 +19,15 @@ type Call struct {
 
 	mux     sync.Mutex
 	closeCh chan struct{}
-	doneCh  chan struct{}
+	doneCh  chan *Call
 	done    bool
 
 	pool *pool
 }
 
-func newCall(msg publisher.Message, doneCh chan struct{}, pool *pool, autoAck bool) *Call {
+func newCall(msg publisher.Message, doneCh chan *Call, pool *pool, autoAck bool) *Call {
 	if doneCh == nil {
-		doneCh = make(chan struct{}, 1)
+		doneCh = make(chan *Call, 1)
 	} else if cap(doneCh) == 0 {
 		panic("amqprpc: ok channel is unbuffered")
 	}
@@ -58,7 +58,7 @@ func (call *Call) Delivery() (amqp.Delivery, error) {
 	return call.delivery, call.error
 }
 
-func (call *Call) Done() <-chan struct{} {
+func (call *Call) Done() <-chan *Call {
 	return call.doneCh
 }
 
@@ -78,7 +78,7 @@ func (call *Call) Close() {
 	call.done = true
 	call.error = ErrClosed
 	call.delivery = amqp.Delivery{}
-	call.doneCh <- struct{}{}
+	call.doneCh <- call
 	close(call.closeCh)
 	call.mux.Unlock()
 
@@ -97,7 +97,7 @@ func (call *Call) errored(err error) {
 	call.done = true
 	call.error = err
 	call.delivery = amqp.Delivery{}
-	call.doneCh <- struct{}{}
+	call.doneCh <- call
 	close(call.closeCh)
 	call.mux.Unlock()
 
@@ -116,7 +116,7 @@ func (call *Call) ok(msg amqp.Delivery) bool {
 	call.done = true
 	call.error = nil
 	call.delivery = msg
-	call.doneCh <- struct{}{}
+	call.doneCh <- call
 	close(call.closeCh)
 	call.mux.Unlock()
 
