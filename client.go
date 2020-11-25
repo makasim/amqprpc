@@ -209,7 +209,7 @@ func (o *options) resolveConsumerOptions(h consumer.Handler, sateCh chan consume
 	return ops
 }
 
-func (c *Client) Go(msg publisher.Message, done chan *Call) *Call {
+func (c *Client) Go(msg publisher.Message, done chan struct{}) *Call {
 	call := newCall(msg, done, c.pool, c.opts.consumer.AutoAck)
 	go c.send(call)
 
@@ -217,7 +217,7 @@ func (c *Client) Go(msg publisher.Message, done chan *Call) *Call {
 }
 
 func (c *Client) Call(msg publisher.Message) (amqp.Delivery, error) {
-	doneCh := make(chan *Call, 1)
+	doneCh := make(chan struct{}, 1)
 	call := newCall(msg, doneCh, c.pool, c.opts.consumer.AutoAck)
 	c.send(call)
 
