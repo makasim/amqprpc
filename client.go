@@ -209,47 +209,47 @@ func (o *options) resolveConsumerOptions(h consumer.Handler, sateCh chan consume
 	return ops
 }
 
-func (client *Client) Go(msg publisher.Message, done chan *Call) *Call {
-	call := newCall(msg, done, client.pool, client.opts.consumer.AutoAck)
-	go client.send(call)
+func (c *Client) Go(msg publisher.Message, done chan *Call) *Call {
+	call := newCall(msg, done, c.pool, c.opts.consumer.AutoAck)
+	go c.send(call)
 
 	return call
 }
 
-func (client *Client) Call(msg publisher.Message) (amqp.Delivery, error) {
+func (c *Client) Call(msg publisher.Message) (amqp.Delivery, error) {
 	doneCh := make(chan *Call, 1)
-	call := newCall(msg, doneCh, client.pool, client.opts.consumer.AutoAck)
-	client.send(call)
+	call := newCall(msg, doneCh, c.pool, c.opts.consumer.AutoAck)
+	c.send(call)
 
 	return call.Delivery()
 }
 
-func (client *Client) Close() error {
-	client.closingMutex.Lock()
-	if client.closing {
-		client.closingMutex.Unlock()
+func (c *Client) Close() error {
+	c.closingMutex.Lock()
+	if c.closing {
+		c.closingMutex.Unlock()
 		return ErrShutdown
 	}
 
-	client.closing = true
-	client.closingMutex.Unlock()
+	c.closing = true
+	c.closingMutex.Unlock()
 
-	defer client.cancelFunc()
-	defer client.consumer.Close()
-	defer client.publisher.Close()
+	defer c.cancelFunc()
+	defer c.consumer.Close()
+	defer c.publisher.Close()
 
-	shutdownPeriodTimer := time.NewTimer(client.opts.shutdownPeriod)
+	shutdownPeriodTimer := time.NewTimer(c.opts.shutdownPeriod)
 	defer shutdownPeriodTimer.Stop()
 
-	client.publisher.Close()
+	c.publisher.Close()
 	select {
-	case <-client.publisher.NotifyClosed():
+	case <-c.publisher.NotifyClosed():
 	case <-shutdownPeriodTimer.C:
 		return fmt.Errorf("amqprpc: shutdown grace period time out: publisher not stopped")
 	}
 
 	var result error
-	if client.pool.count() > 0 {
+	if c.pool.count() > 0 {
 		ticker := time.NewTicker(time.Millisecond * 200)
 		defer ticker.Stop()
 
@@ -257,7 +257,7 @@ func (client *Client) Close() error {
 		for {
 			select {
 			case <-ticker.C:
-				if client.pool.count() == 0 {
+				if c.pool.count() == 0 {
 					break loop
 				}
 			case <-shutdownPeriodTimer.C:
@@ -269,11 +269,11 @@ func (client *Client) Close() error {
 		}
 	}
 
-	close(client.closeCallsCh)
+	close(c.closeCallsCh)
 
-	client.consumer.Close()
+	c.consumer.Close()
 	select {
-	case <-client.consumer.NotifyClosed():
+	case <-c.consumer.NotifyClosed():
 	case <-shutdownPeriodTimer.C:
 		return fmt.Errorf("amqprpc: shutdown grace period time out: consumer not stopped")
 	}
@@ -281,15 +281,15 @@ func (client *Client) Close() error {
 	return result
 }
 
-func (client *Client) send(call *Call) {
+func (c *Client) send(call *Call) {
 	var (
 		publisherUnreadyCh chan error
 		consumerUnreadyCh  chan error
 	)
 
 	if call.message.ErrOnUnready {
-		publisherUnreadyCh = client.publisherUnreadyCh
-		consumerUnreadyCh = client.consumerUnreadyCh
+		publisherUnreadyCh = c.publisherUnreadyCh
+		consumerUnreadyCh = c.consumerUnreadyCh
 	}
 
 	if call.message.Context == nil {
@@ -297,13 +297,13 @@ func (client *Client) send(call *Call) {
 	}
 
 	select {
-	case replyQueue := <-client.replyQueueCh:
+	case replyQueue := <-c.replyQueueCh:
 		resultCh := make(chan error, 1)
 		call.message.Publishing.ReplyTo = replyQueue.name
 		call.message.Publishing.CorrelationId = uuid.New().String()
 		call.message.ResultCh = resultCh
-		client.pool.set(call)
-		err := client.publisher.Publish(call.message)
+		c.pool.set(call)
+		err := c.publisher.Publish(call.message)
 		if err != nil {
 			call.errored(err)
 		}
@@ -321,7 +321,7 @@ func (client *Client) send(call *Call) {
 				return
 			case <-call.closeCh:
 				return
-			case <-client.closeCallsCh:
+			case <-c.closeCallsCh:
 				call.errored(ErrShutdown)
 				return
 			case <-replyQueue.closeCh:
@@ -344,18 +344,18 @@ func (client *Client) send(call *Call) {
 	case <-call.message.Context.Done():
 		call.errored(call.message.Context.Err())
 		return
-	case <-client.publisher.NotifyClosed():
+	case <-c.publisher.NotifyClosed():
 		call.errored(ErrShutdown)
 		return
 	}
 }
 
-func (client *Client) reply(_ context.Context, msg amqp.Delivery) interface{} {
+func (c *Client) reply(_ context.Context, msg amqp.Delivery) interface{} {
 	if msg.CorrelationId == "" {
 		return middleware.Nack
 	}
 
-	call, ok := client.pool.fetch(msg.CorrelationId)
+	call, ok := c.pool.fetch(msg.CorrelationId)
 	if !ok {
 		return middleware.Nack
 	}
