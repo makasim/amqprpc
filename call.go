@@ -93,7 +93,6 @@ func (call *Call) errored(err error) {
 	}
 
 	corrID := call.message.Publishing.CorrelationId
-
 	call.done = true
 	call.error = err
 	call.delivery = amqp.Delivery{}
