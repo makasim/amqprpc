@@ -1,7 +1,6 @@
 package e2e_test
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/makasim/amqpextra/publisher"
@@ -71,7 +70,6 @@ func TestSendManyOneByOne(t *testing.T) {
 			t.Errorf("waiting for replies timeout")
 			return
 		case <-calls:
-			fmt.Println(got)
 			got++
 			if got == 2000 {
 				return

@@ -43,12 +43,12 @@ func RunEchoServer(dsn, queue string, declare bool) func() {
 			Key: msg.ReplyTo,
 			Publishing: amqp.Publishing{
 				CorrelationId: msg.CorrelationId,
-				Body:          []byte(string(msg.Body)),
+				Body:          msg.Body,
 			},
 		})
 
-		if err = msg.Ack(false); err != nil {
-			panic(err)
+		if ackErr := msg.Ack(false); ackErr != nil {
+			panic(ackErr)
 		}
 
 		return nil

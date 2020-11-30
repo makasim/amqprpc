@@ -21,6 +21,7 @@ import (
 	"github.com/streadway/amqp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"log"
 )
 
 const AMQPDSN = "amqp://guest:guest@rabbitmq:5672/amqprpc"
@@ -180,14 +181,15 @@ func TestConsumerConnectionErroredOnUnready(t *testing.T) {
 	require.NoError(t, err)
 	defer client.Close()
 
+	log.Print(1)
 	call := client.Go(
 		publisher.Message{
 			Key:          "foo_queue",
 			ErrOnUnready: true,
 		}, make(chan *amqprpc.Call, 1))
-
+	log.Print(2)
 	call = <-call.Done()
-
+	log.Print(3)
 	time.Sleep(500 * time.Millisecond)
 	_, err = call.Delivery()
 	require.EqualError(t, err, fmt.Sprintf("amqprpc: consumer unready: %s", amqp.ErrClosed))

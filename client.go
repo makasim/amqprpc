@@ -45,6 +45,7 @@ type Client struct {
 	pool            *pool
 	consumer        *consumer.Consumer
 	consumerStateCh chan consumer.State
+	consumerUnreadyCh chan struct{}
 
 	publisher        *publisher.Publisher
 	publisherStateCh chan publisher.State
@@ -95,6 +96,7 @@ func New(
 		middleware.AckNack(),
 	)
 
+	c.consumerUnreadyCh = make(chan struct{})
 	c.consumerStateCh = make(chan consumer.State, 1)
 	cons, err := amqpextra.NewConsumer(
 		consumerConnCh,
@@ -145,13 +147,31 @@ func New(
 			}
 		}
 	}()
-
+	
 	go func() {
-		select {
-		case <-c.context.Done():
-			c.Close()
-		case <-c.publisherStateCh:
-			return
+		var localConsumerUnreadyCh chan struct{}
+		
+		localConsumerUnreadyCh = c.consumerUnreadyCh
+		for {
+			select {
+			case state, ok := <-c.consumerStateCh:
+				if !ok {
+					panic("that should never happen")
+				}
+				
+				if state.Ready != nil {
+					localConsumerUnreadyCh = nil
+				}
+				if state.Unready != nil {
+					localConsumerUnreadyCh = c.consumerUnreadyCh
+				}
+				
+				continue
+			case localConsumerUnreadyCh <- struct{}{}:
+				continue
+			case <-c.context.Done():
+				return
+			}
 		}
 	}()
 
@@ -268,12 +288,12 @@ func (c *Client) Close() error {
 func (c *Client) send(call *Call) {
 	var (
 		publisherStateCh chan publisher.State
-		consumerStateCh  chan consumer.State
+		consumerUnreadyCh  chan struct{}
 	)
 
 	if call.message.ErrOnUnready {
 		publisherStateCh = c.publisherStateCh
-		consumerStateCh = c.consumerStateCh
+		consumerUnreadyCh = c.consumerUnreadyCh
 	}
 
 	if call.message.Context == nil {
@@ -320,11 +340,8 @@ func (c *Client) send(call *Call) {
 		case <-call.Closed():
 			return
 		// noinspection GoNilness
-		case state := <-consumerStateCh:
-			if state.Unready != nil {
-				call.errored(fmt.Errorf("amqprpc: consumer unready: %s", state.Unready.Err))
-
-			}
+		case <-consumerUnreadyCh:
+			call.errored(fmt.Errorf("amqprpc: consumer unready: %s", fmt.Errorf("TODO")))
 			return
 		// noinspection GoNilness
 		case state := <-publisherStateCh:
