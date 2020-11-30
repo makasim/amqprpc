@@ -15,9 +15,6 @@ import (
 	"go.uber.org/goleak"
 )
 
-// TODO
-const LOCALDSN = "amqp://guest:guest@localhost:5672"
-
 func TestSendManyOneByOne(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
@@ -52,8 +49,7 @@ func TestSendManyOneByOne(t *testing.T) {
 
 	for i := 0; i < 2000; i++ {
 		client.Go(publisher.Message{
-			Key:          rpcQueue,
-			ErrOnUnready: false,
+			Key: rpcQueue,
 			Publishing: amqp.Publishing{
 				Body: []byte("hello!"),
 			},
@@ -114,8 +110,7 @@ func TestSendManyConcurrently(t *testing.T) {
 		go func() {
 			for i := 0; i < 500; i++ {
 				client.Go(publisher.Message{
-					Key:          rpcQueue,
-					ErrOnUnready: false,
+					Key: rpcQueue,
 					Publishing: amqp.Publishing{
 						Body: []byte("hello!"),
 					},
@@ -124,7 +119,7 @@ func TestSendManyConcurrently(t *testing.T) {
 		}()
 	}
 
-	timer := time.NewTimer(5 * time.Second)
+	timer := time.NewTimer(20 * time.Second)
 	defer timer.Stop()
 
 	got := 0

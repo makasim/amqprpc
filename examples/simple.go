@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 
 	"time"
@@ -12,7 +11,7 @@ import (
 	"github.com/streadway/amqp"
 )
 
-const dsn = "amqp://guest:guest@localhost:5672"
+const dsn = "amqp://guest:guest@rabbitmq:5672/amqprp"
 
 func main() {
 
@@ -43,8 +42,7 @@ func main() {
 	defer client.Close()
 
 	call := client.Go(publisher.Message{
-		ErrOnUnready: false,
-		Key:          "a_reply_queue",
+		Key: "a_reply_queue",
 		Publishing: amqp.Publishing{
 			Body: []byte(`Have you heard the news?`),
 		},
@@ -61,7 +59,5 @@ func main() {
 		log.Print("DELIVERED: ", string(rpl.Body))
 
 	case <-time.NewTimer(time.Second * 3).C:
-		fmt.Println("close")
-		call.Close()
 	}
 }

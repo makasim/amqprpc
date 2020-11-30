@@ -30,15 +30,20 @@ func RunEchoServer(dsn, queue string, declare bool) func() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	pub, err := amqpextra.NewPublisher(publisherDial.ConnectionCh())
 	if err != nil {
 		panic(err)
 	}
 
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(dsn))
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	ctx, cancelFunc := context.WithTimeout(context.Background(), 20*time.Second)
 
 	h := consumer.HandlerFunc(func(ctx context.Context, msg amqp.Delivery) interface{} {
+
 		pub.Publish(publisher.Message{
 			Key: msg.ReplyTo,
 			Publishing: amqp.Publishing{
@@ -63,11 +68,6 @@ func RunEchoServer(dsn, queue string, declare bool) func() {
 
 	stateCh := make(chan consumer.State, 1)
 
-	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(dsn))
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	c, err := amqpextra.NewConsumer(
 		consumerDial.ConnectionCh(),
 		consumer.WithContext(ctx),
@@ -84,6 +84,7 @@ func RunEchoServer(dsn, queue string, declare bool) func() {
 		cancelFunc()
 		publisherDial.Close()
 		consumerDial.Close()
+
 		c.Close()
 		pub.Close()
 	}

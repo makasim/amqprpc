@@ -42,14 +42,17 @@ type Client struct {
 	context    context.Context
 	cancelFunc context.CancelFunc
 
-	pool            *pool
-	consumer        *consumer.Consumer
-	consumerStateCh chan consumer.State
-	consumerUnreadyCh chan struct{}
+	pool *pool
 
-	publisher        *publisher.Publisher
-	publisherStateCh chan publisher.State
-	replyQueueCh     chan replyQueue
+	consumer          *consumer.Consumer
+	consumerStateCh   chan consumer.State
+	consumerUnreadyCh chan error
+
+	publisher          *publisher.Publisher
+	publisherStateCh   chan publisher.State
+	publisherUnreadyCh chan error
+
+	replyQueueCh chan replyQueue
 
 	closeCallsCh chan struct{}
 
@@ -79,11 +82,12 @@ func New(
 			shutdownPeriod: 20 * time.Second,
 		},
 
-		context:      context.Background(),
-		closeCallsCh: make(chan struct{}),
-		replyQueueCh: make(chan replyQueue),
-
-		pool: newPool(),
+		context:            context.Background(),
+		closeCallsCh:       make(chan struct{}),
+		replyQueueCh:       make(chan replyQueue),
+		consumerUnreadyCh:  make(chan error),
+		publisherUnreadyCh: make(chan error),
+		pool:               newPool(),
 	}
 
 	for _, opt := range opts {
@@ -96,7 +100,7 @@ func New(
 		middleware.AckNack(),
 	)
 
-	c.consumerUnreadyCh = make(chan struct{})
+	c.consumerUnreadyCh = make(chan error)
 	c.consumerStateCh = make(chan consumer.State, 1)
 	cons, err := amqpextra.NewConsumer(
 		consumerConnCh,
@@ -104,7 +108,6 @@ func New(
 	if err != nil {
 		return nil, err
 	}
-
 	c.consumer = cons
 
 	c.publisherStateCh = make(chan publisher.State, 1)
@@ -116,14 +119,13 @@ func New(
 		return nil, err
 	}
 	c.publisher = pub
-
 	c.context, c.cancelFunc = context.WithCancel(c.context)
 	go func() {
 		closeCh := make(chan struct{})
-
 		for {
 			select {
 			case consumerState := <-c.consumerStateCh:
+
 				for {
 					if consumerState.Unready != nil {
 						break
@@ -133,7 +135,6 @@ func New(
 						name:    consumerState.Ready.Queue,
 						closeCh: closeCh,
 					}:
-
 					case <-c.consumer.NotifyClosed():
 						return
 					}
@@ -147,35 +148,69 @@ func New(
 			}
 		}
 	}()
-	
-	go func() {
-		var localConsumerUnreadyCh chan struct{}
-		
-		localConsumerUnreadyCh = c.consumerUnreadyCh
-		for {
-			select {
-			case state, ok := <-c.consumerStateCh:
-				if !ok {
-					panic("that should never happen")
-				}
-				
-				if state.Ready != nil {
-					localConsumerUnreadyCh = nil
-				}
-				if state.Unready != nil {
-					localConsumerUnreadyCh = c.consumerUnreadyCh
-				}
-				
-				continue
-			case localConsumerUnreadyCh <- struct{}{}:
-				continue
-			case <-c.context.Done():
-				return
-			}
-		}
-	}()
+
+	go c.serveConsumerUnreadyState()
+	go c.servePublisherUnreadyState()
 
 	return c, nil
+}
+
+func (c *Client) serveConsumerUnreadyState() {
+
+	localStateCh := c.consumer.Notify(make(chan consumer.State, 1))
+	localConsumerUnreadyCh := c.consumerUnreadyCh
+	var err error = amqp.ErrClosed
+
+	for {
+		select {
+		case state, ok := <-localStateCh:
+			if !ok {
+				panic("that should never happen")
+			}
+
+			if state.Ready != nil {
+				localConsumerUnreadyCh = nil
+			}
+			if state.Unready != nil {
+				err = state.Unready.Err
+				localConsumerUnreadyCh = c.consumerUnreadyCh
+			}
+
+			continue
+		case localConsumerUnreadyCh <- err:
+			continue
+		case <-c.context.Done():
+			return
+		}
+	}
+}
+
+func (c *Client) servePublisherUnreadyState() {
+
+	localPublisherUnreadyCh := c.publisherUnreadyCh
+	var err error = amqp.ErrClosed
+
+	for {
+		select {
+		case state, ok := <-c.publisherStateCh:
+			if !ok {
+				panic("that should never happen")
+			}
+			if state.Ready != nil {
+				localPublisherUnreadyCh = nil
+			}
+			if state.Unready != nil {
+				err = state.Unready.Err
+				localPublisherUnreadyCh = c.publisherUnreadyCh
+			}
+
+			continue
+		case localPublisherUnreadyCh <- err:
+			continue
+		case <-c.context.Done():
+			return
+		}
+	}
 }
 
 func (o *options) resolveConsumerOptions(h consumer.Handler, sateCh chan consumer.State) []consumer.Option {
@@ -287,12 +322,12 @@ func (c *Client) Close() error {
 
 func (c *Client) send(call *Call) {
 	var (
-		publisherStateCh chan publisher.State
-		consumerUnreadyCh  chan struct{}
+		publisherUnreadyCh chan error
+		consumerUnreadyCh  chan error
 	)
 
 	if call.message.ErrOnUnready {
-		publisherStateCh = c.publisherStateCh
+		publisherUnreadyCh = c.publisherUnreadyCh
 		consumerUnreadyCh = c.consumerUnreadyCh
 	}
 
@@ -300,62 +335,58 @@ func (c *Client) send(call *Call) {
 		call.message.Context = context.Background()
 	}
 
-	for {
-		select {
-		case replyQueue := <-c.replyQueueCh:
-			resultCh := make(chan error, 1)
-			call.message.Publishing.ReplyTo = replyQueue.name
-			call.message.Publishing.CorrelationId = uuid.New().String()
-			call.message.ResultCh = resultCh
-			c.pool.set(call)
-			err := c.publisher.Publish(call.message)
-			if err != nil {
-				call.errored(err)
-			}
-			for {
-				select {
-				case err := <-resultCh:
-					if err != nil {
-						call.errored(err)
-						return
-					}
-
-					resultCh = nil
-					continue
-				case <-call.Closed():
-					return
-				case <-call.closeCh:
-					return
-				case <-c.closeCallsCh:
-					call.errored(ErrShutdown)
-					return
-				case <-replyQueue.closeCh:
-					call.errored(ErrReplyQueueGoneAway)
-					return
-				case <-call.message.Context.Done():
-					call.errored(call.message.Context.Err())
+	select {
+	case replyQueue := <-c.replyQueueCh:
+		resultCh := make(chan error, 1)
+		call.message.Publishing.ReplyTo = replyQueue.name
+		call.message.Publishing.CorrelationId = uuid.New().String()
+		call.message.ResultCh = resultCh
+		c.pool.set(call)
+		err := c.publisher.Publish(call.message)
+		if err != nil {
+			call.errored(err)
+		}
+		for {
+			select {
+			case err := <-resultCh:
+				if err != nil {
+					call.errored(err)
 					return
 				}
+
+				resultCh = nil
+				continue
+			case <-call.Closed():
+				return
+			case <-call.closeCh:
+				return
+			case <-c.closeCallsCh:
+				call.errored(ErrShutdown)
+				return
+			case <-replyQueue.closeCh:
+				call.errored(ErrReplyQueueGoneAway)
+				return
+			case <-call.message.Context.Done():
+				call.errored(call.message.Context.Err())
+				return
 			}
-		case <-call.Closed():
-			return
-		// noinspection GoNilness
-		case <-consumerUnreadyCh:
-			call.errored(fmt.Errorf("amqprpc: consumer unready: %s", fmt.Errorf("TODO")))
-			return
-		// noinspection GoNilness
-		case state := <-publisherStateCh:
-			if state.Unready != nil {
-				call.errored(fmt.Errorf("amqprpc: publisher unready: %s", state.Unready.Err))
-			}
-			return
-		case <-call.message.Context.Done():
-			call.errored(call.message.Context.Err())
-			return
-		case <-c.publisher.NotifyClosed():
-			call.errored(ErrShutdown)
-			return
 		}
+	case <-call.Closed():
+		return
+	// noinspection GoNilness
+	case err := <-consumerUnreadyCh:
+		call.errored(fmt.Errorf("amqprpc: consumer unready: %s", err))
+		return
+	// noinspection GoNilness
+	case err := <-publisherUnreadyCh:
+		call.errored(fmt.Errorf("amqprpc: publisher not ready: %s", err))
+		return
+	case <-call.message.Context.Done():
+		call.errored(call.message.Context.Err())
+		return
+	case <-c.publisher.NotifyClosed():
+		call.errored(ErrShutdown)
+		return
 	}
 }
 
