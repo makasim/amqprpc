@@ -1,7 +1,10 @@
 package e2e_test
 
 import (
+	"fmt"
 	"testing"
+
+	"github.com/makasim/amqpextra/publisher"
 
 	"time"
 
@@ -13,16 +16,27 @@ import (
 	"go.uber.org/goleak"
 )
 
+// TODO
+const LOCALDSN = "amqp://guest:guest@localhost:5672"
+
 func TestSendManyOneByOne(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	rpcQueue := rabbitmq.UniqueQueue()
 	defer rabbitmq.RunEchoServer(AMQPDSN, rpcQueue, true)()
 
-	consumerConn := amqpextra.Dial([]string{AMQPDSN})
-	defer consumerConn.Close()
-	publisherConn := amqpextra.Dial([]string{AMQPDSN})
-	defer publisherConn.Close()
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer consumerDial.Close()
+
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	if err != nil {
+		panic(err)
+	}
+	defer publisherDial.Close()
+
+	consumerConn := consumerDial.ConnectionCh()
+	publisherConn := publisherDial.ConnectionCh()
 
 	client, err := amqprpc.New(
 		publisherConn,
@@ -38,16 +52,16 @@ func TestSendManyOneByOne(t *testing.T) {
 	calls := make(chan *amqprpc.Call, 2000)
 
 	for i := 0; i < 2000; i++ {
-		client.Go(amqpextra.Publishing{
-			Key:       rpcQueue,
-			WaitReady: true,
-			Message: amqp.Publishing{
+		client.Go(publisher.Message{
+			Key:          rpcQueue,
+			ErrOnUnready: false,
+			Publishing: amqp.Publishing{
 				Body: []byte("hello!"),
 			},
 		}, calls)
 	}
 
-	timer := time.NewTimer(5 * time.Second)
+	timer := time.NewTimer(20 * time.Second)
 	defer timer.Stop()
 
 	got := 0
@@ -55,9 +69,9 @@ func TestSendManyOneByOne(t *testing.T) {
 		select {
 		case <-timer.C:
 			t.Errorf("waiting for replies timeout")
-
 			return
 		case <-calls:
+			fmt.Println(got)
 			got++
 			if got == 2000 {
 				return
@@ -72,10 +86,19 @@ func TestSendManyConcurrently(t *testing.T) {
 	rpcQueue := rabbitmq.UniqueQueue()
 	defer rabbitmq.RunEchoServer(AMQPDSN, rpcQueue, true)()
 
-	consumerConn := amqpextra.Dial([]string{AMQPDSN})
-	defer consumerConn.Close()
-	publisherConn := amqpextra.Dial([]string{AMQPDSN})
-	defer publisherConn.Close()
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+
+	defer consumerDial.Close()
+
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	if err != nil {
+		panic(err)
+	}
+	defer publisherDial.Close()
+
+	consumerConn := consumerDial.ConnectionCh()
+	publisherConn := publisherDial.ConnectionCh()
 
 	client, err := amqprpc.New(
 		publisherConn,
@@ -92,10 +115,10 @@ func TestSendManyConcurrently(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		go func() {
 			for i := 0; i < 500; i++ {
-				client.Go(amqpextra.Publishing{
-					Key:       rpcQueue,
-					WaitReady: true,
-					Message: amqp.Publishing{
+				client.Go(publisher.Message{
+					Key:          rpcQueue,
+					ErrOnUnready: false,
+					Publishing: amqp.Publishing{
 						Body: []byte("hello!"),
 					},
 				}, calls)
@@ -107,6 +130,7 @@ func TestSendManyConcurrently(t *testing.T) {
 	defer timer.Stop()
 
 	got := 0
+loop:
 	for {
 		select {
 		case <-timer.C:
@@ -116,7 +140,7 @@ func TestSendManyConcurrently(t *testing.T) {
 		case <-calls:
 			got++
 			if got == 2000 {
-				return
+				break loop
 			}
 		}
 	}
