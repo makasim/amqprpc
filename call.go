@@ -48,6 +48,12 @@ func (call *Call) Message() publisher.Message {
 	return call.message
 }
 
+func (call *Call) set(msg publisher.Message) {
+	call.mux.Lock()
+	defer call.mux.Unlock()
+	call.message = msg
+}
+
 func (call *Call) Delivery() (amqp.Delivery, error) {
 	call.mux.Lock()
 	defer call.mux.Unlock()

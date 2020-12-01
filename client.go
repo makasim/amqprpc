@@ -338,9 +338,11 @@ func (c *Client) send(call *Call) {
 	select {
 	case replyQueue := <-c.replyQueueCh:
 		resultCh := make(chan error, 1)
-		call.message.Publishing.ReplyTo = replyQueue.name
-		call.message.Publishing.CorrelationId = uuid.New().String()
-		call.message.ResultCh = resultCh
+		msg := call.Message()
+		msg.Publishing.ReplyTo = replyQueue.name
+		msg.Publishing.CorrelationId = uuid.New().String()
+		msg.ResultCh = resultCh
+		call.set(msg)
 		c.pool.set(call)
 		err := c.publisher.Publish(call.message)
 		if err != nil {

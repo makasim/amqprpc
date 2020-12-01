@@ -91,17 +91,22 @@ func RunEchoServer(dsn, queue string, declare bool) func() {
 }
 
 func RunSleepServer(dsn, queue string, dur time.Duration) func() {
-	conn, err := amqpextra.NewDialer(amqpextra.WithURL(dsn))
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(dsn))
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	pub, err := amqpextra.NewPublisher(conn.ConnectionCh())
+	pub, err := publisherDial.Publisher()
 	if err != nil {
 		panic(err)
 	}
 
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(dsn))
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	h := consumer.HandlerFunc(func(ctx context.Context, msg amqp.Delivery) interface{} {
+		fmt.Println("sleep")
 		time.Sleep(dur)
 		pub.Publish(publisher.Message{
 			Key: msg.ReplyTo,
@@ -118,8 +123,7 @@ func RunSleepServer(dsn, queue string, dur time.Duration) func() {
 		return nil
 	})
 
-	c, err := amqpextra.NewConsumer(
-		conn.ConnectionCh(),
+	c, err := publisherDial.Consumer(
 		consumer.WithWorker(consumer.NewParallelWorker(10)),
 		consumer.WithDeclareQueue(queue, false, true, false, false, amqp.Table{}),
 		consumer.WithHandler(h),
@@ -128,7 +132,8 @@ func RunSleepServer(dsn, queue string, dur time.Duration) func() {
 	return func() {
 		c.Close()
 		pub.Close()
-		conn.Close()
+		consumerDial.Close()
+		publisherDial.Close()
 	}
 }
 

@@ -326,41 +326,6 @@ func TestNoPublisherConnectionContextDeadlined(t *testing.T) {
 	require.NoError(t, client.Close())
 }
 
-func TestNoPublisherConnectionErrorOnUnready(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
-	require.NoError(t, err)
-	defer consumerDial.Close()
-
-	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(InvalidDSN))
-	require.NoError(t, err)
-	defer publisherDial.Close()
-
-	consumerConn := consumerDial.ConnectionCh()
-	publisherConn := publisherDial.ConnectionCh()
-
-	client, err := amqprpc.New(
-		publisherConn,
-		consumerConn,
-		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
-			Name: "foo_reply_queue",
-		}))
-	require.NoError(t, err)
-	defer client.Close()
-
-	call := client.Go(publisher.Message{
-		Key:          "foo_queue",
-		ErrOnUnready: true,
-	}, make(chan *amqprpc.Call, 1))
-
-	<-call.Done()
-	_, err = call.Delivery()
-	require.EqualError(t, err, `amqprpc: publisher unready`)
-
-	require.NoError(t, client.Close())
-}
-
 func TestCallAndReplyTempReplyQueue(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
@@ -511,9 +476,6 @@ func TestCancelBeforeReply(t *testing.T) {
 	call := client.Go(publisher.Message{
 		Key:          rpcQueue,
 		ErrOnUnready: false,
-		Publishing: amqp.Publishing{
-			Body: []byte("hello!"),
-		},
 	}, make(chan *amqprpc.Call, 1))
 	defer call.Close()
 
