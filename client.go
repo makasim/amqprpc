@@ -122,19 +122,22 @@ func New(
 	c.context, c.cancelFunc = context.WithCancel(c.context)
 	go func() {
 		closeCh := make(chan struct{})
+	loop:
 		for {
+
 			select {
 			case consumerState := <-c.consumerStateCh:
-
 				for {
 					if consumerState.Unready != nil {
 						break
 					}
+
 					select {
 					case c.replyQueueCh <- replyQueue{
 						name:    consumerState.Ready.Queue,
 						closeCh: closeCh,
 					}:
+						continue loop
 					case <-c.consumer.NotifyClosed():
 						return
 					}
@@ -156,7 +159,6 @@ func New(
 }
 
 func (c *Client) serveConsumerUnreadyState() {
-
 	localStateCh := c.consumer.Notify(make(chan consumer.State, 1))
 	localConsumerUnreadyCh := c.consumerUnreadyCh
 	var err error = amqp.ErrClosed
@@ -186,7 +188,6 @@ func (c *Client) serveConsumerUnreadyState() {
 }
 
 func (c *Client) servePublisherUnreadyState() {
-
 	localPublisherUnreadyCh := c.publisherUnreadyCh
 	var err error = amqp.ErrClosed
 
@@ -361,8 +362,10 @@ func (c *Client) send(call *Call) {
 			case <-call.Closed():
 				return
 			case <-call.closeCh:
+
 				return
 			case <-c.closeCallsCh:
+
 				call.errored(ErrShutdown)
 				return
 			case <-replyQueue.closeCh:

@@ -449,7 +449,7 @@ func TestCancelBeforeReply(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	rpcQueue := rabbitmq.UniqueQueue()
-	defer rabbitmq.RunSleepServer(AMQPDSN, rpcQueue, time.Second)()
+	defer rabbitmq.RunSleepServer(AMQPDSN, rpcQueue, time.Second, true)()
 
 	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
 	require.NoError(t, err)
@@ -459,12 +459,9 @@ func TestCancelBeforeReply(t *testing.T) {
 	require.NoError(t, err)
 	defer consumerDial.Close()
 
-	consumerConn := consumerDial.ConnectionCh()
-	publisherConn := publisherDial.ConnectionCh()
-
 	client, err := amqprpc.New(
-		publisherConn,
-		consumerConn,
+		consumerDial.ConnectionCh(),
+		publisherDial.ConnectionCh(),
 		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
 			Name:    "",
 			Declare: true,
@@ -488,6 +485,10 @@ func TestCancelBeforeReply(t *testing.T) {
 	_, err = call.Delivery()
 	require.EqualError(t, err, "amqprpc: call closed")
 
+	consumerDial.Close()
+	publisherDial.Close()
+	<-publisherDial.NotifyClosed()
+	<-consumerDial.NotifyClosed()
 	require.NoError(t, client.Close())
 }
 
@@ -618,7 +619,7 @@ func TestShutdownWaitForInflight(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	rpcQueue := rabbitmq.UniqueQueue()
-	defer rabbitmq.RunSleepServer(AMQPDSN, rpcQueue, time.Second)()
+	defer rabbitmq.RunSleepServer(AMQPDSN, rpcQueue, time.Second, true)()
 
 	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
 	require.NoError(t, err)
@@ -673,8 +674,8 @@ func TestErrorReplyQueueHasGoneIfReplyQueueAutoDeleted(t *testing.T) {
 	publisherConn := publisherDial.ConnectionCh()
 
 	client, err := amqprpc.New(
-		publisherConn,
 		consumerConn,
+		publisherConn,
 		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
 			Name:       replyQueue,
 			AutoDelete: true,
@@ -685,8 +686,7 @@ func TestErrorReplyQueueHasGoneIfReplyQueueAutoDeleted(t *testing.T) {
 	defer client.Close()
 
 	call := client.Go(publisher.Message{
-		Key:          rpcQueue,
-		ErrOnUnready: false,
+		Key: rpcQueue,
 		Publishing: amqp.Publishing{
 			Body: []byte("hello!"),
 		},
@@ -744,8 +744,7 @@ func TestErrorReplyQueueHasGoneIfTemporaryQueue(t *testing.T) {
 	defer client.Close()
 
 	call := client.Go(publisher.Message{
-		Key:          rpcQueue,
-		ErrOnUnready: false,
+		Key: rpcQueue,
 		Publishing: amqp.Publishing{
 			Body: []byte("hello!"),
 		},
