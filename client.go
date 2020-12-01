@@ -118,44 +118,46 @@ func New(
 	if err != nil {
 		return nil, err
 	}
+
 	c.publisher = pub
 	c.context, c.cancelFunc = context.WithCancel(c.context)
-	go func() {
-		closeCh := make(chan struct{})
-	loop:
-		for {
 
-			select {
-			case consumerState := <-c.consumerStateCh:
-				for {
-					if consumerState.Unready != nil {
-						break
-					}
-
-					select {
-					case c.replyQueueCh <- replyQueue{
-						name:    consumerState.Ready.Queue,
-						closeCh: closeCh,
-					}:
-						continue loop
-					case <-c.consumer.NotifyClosed():
-						return
-					}
-				}
-			case <-c.consumer.NotifyClosed():
-				return
-			}
-			if c.opts.replyQueue.Name == "" || c.opts.replyQueue.AutoDelete {
-				close(closeCh)
-				closeCh = make(chan struct{})
-			}
-		}
-	}()
-
+	go c.serveConsumerQueue()
 	go c.serveConsumerUnreadyState()
 	go c.servePublisherUnreadyState()
 
 	return c, nil
+}
+
+func (c *Client) serveConsumerQueue() {
+	closeCh := make(chan struct{})
+loop:
+	for {
+		select {
+		case consumerState := <-c.consumerStateCh:
+			for {
+				if consumerState.Unready != nil {
+					break
+				}
+
+				select {
+				case c.replyQueueCh <- replyQueue{
+					name:    consumerState.Ready.Queue,
+					closeCh: closeCh,
+				}:
+					continue loop
+				case <-c.consumer.NotifyClosed():
+					return
+				}
+			}
+		case <-c.consumer.NotifyClosed():
+			return
+		}
+		if c.opts.replyQueue.Name == "" || c.opts.replyQueue.AutoDelete {
+			close(closeCh)
+			closeCh = make(chan struct{})
+		}
+	}
 }
 
 func (c *Client) serveConsumerUnreadyState() {

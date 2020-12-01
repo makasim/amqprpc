@@ -347,10 +347,6 @@ func TestCallAndReplyTempReplyQueue(t *testing.T) {
 	client, err := amqprpc.New(
 		publisherConn,
 		consumerConn,
-		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
-			Name:    "",
-			Declare: true,
-		}),
 	)
 	require.NoError(t, err)
 	defer client.Close()
@@ -737,8 +733,8 @@ func TestErrorReplyQueueHasGoneIfTemporaryQueue(t *testing.T) {
 	publisherConn := publisherDial.ConnectionCh()
 
 	client, err := amqprpc.New(
-		publisherConn,
 		consumerConn,
+		publisherConn,
 	)
 	require.NoError(t, err)
 	defer client.Close()

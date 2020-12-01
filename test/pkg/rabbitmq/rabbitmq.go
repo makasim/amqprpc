@@ -167,7 +167,7 @@ func CloseConn(userProvidedName string) bool {
 
 		if connUserProvidedName == userProvidedName {
 			req, err := http.NewRequest(
-				"DELETE",
+				http.MethodDelete,
 				fmt.Sprintf("http://guest:guest@rabbitmq:15672/api/connections/%s", conn["name"].(string)),
 				nil,
 			)
