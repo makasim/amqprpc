@@ -267,7 +267,7 @@ func (c *Client) Call(msg publisher.Message) (amqp.Delivery, error) {
 	doneCh := make(chan *Call, 1)
 	call := newCall(msg, doneCh, c.pool, c.opts.consumer.AutoAck)
 	c.send(call)
-	return call.Delivery()
+	return call.Reply()
 }
 
 func (c *Client) Close() error {
@@ -332,55 +332,33 @@ func (c *Client) send(call *Call) {
 		consumerUnreadyCh  chan error
 	)
 
-	if call.message.ErrOnUnready {
+	if call.request.ErrOnUnready {
 		publisherUnreadyCh = c.publisherUnreadyCh
 		consumerUnreadyCh = c.consumerUnreadyCh
 	}
 
-	if call.message.Context == nil {
-		call.message.Context = context.Background()
+	if call.request.Context == nil {
+		call.request.Context = context.Background()
 	}
 
 	select {
-	case replyQueue := <-c.replyQueueCh:
-		resultCh := make(chan error, 1)
-		msg := call.Message()
-		msg.Publishing.ReplyTo = replyQueue.name
+	case rq := <-c.replyQueueCh:
+		msg := call.Request()
+		msg.Publishing.ReplyTo = rq.name
 		msg.Publishing.CorrelationId = uuid.New().String()
-		msg.ResultCh = resultCh
+		msg.ResultCh = make(chan error, 1)
+		
 		call.set(msg)
 		c.pool.set(call)
-		err := c.publisher.Publish(call.message)
+		
+		err := c.publisher.Publish(call.request)
 		if err != nil {
 			call.errored(err)
+			return
 		}
-		for {
-			select {
-			case err := <-resultCh:
-				if err != nil {
-					call.errored(err)
-					return
-				}
 
-				resultCh = nil
-				continue
-			case <-call.Closed():
-				return
-			case <-call.closeCh:
-
-				return
-			case <-c.closeCallsCh:
-
-				call.errored(ErrShutdown)
-				return
-			case <-replyQueue.closeCh:
-				call.errored(ErrReplyQueueGoneAway)
-				return
-			case <-call.message.Context.Done():
-				call.errored(call.message.Context.Err())
-				return
-			}
-		}
+		c.waitReply(call, rq)
+		return
 	case <-call.Closed():
 		return
 	// noinspection GoNilness
@@ -391,12 +369,42 @@ func (c *Client) send(call *Call) {
 	case err := <-publisherUnreadyCh:
 		call.errored(fmt.Errorf("amqprpc: publisher not ready: %s", err))
 		return
-	case <-call.message.Context.Done():
-		call.errored(call.message.Context.Err())
+	case <-call.request.Context.Done():
+		call.errored(call.request.Context.Err())
 		return
 	case <-c.publisher.NotifyClosed():
 		call.errored(ErrShutdown)
 		return
+	}
+}
+
+func (c *Client) waitReply(call *Call, rq replyQueue) {
+	publishResultCh := call.Request().ResultCh
+	
+	for {
+		select {
+		case err := <-publishResultCh:
+			if err != nil {
+				call.errored(err)
+				return
+			}
+
+			publishResultCh = nil
+			continue
+		case <-call.Closed():
+			return
+		case <-call.closeCh:
+			return
+		case <-c.closeCallsCh:
+			call.errored(ErrShutdown)
+			return
+		case <-rq.closeCh:
+			call.errored(ErrReplyQueueGoneAway)
+			return
+		case <-call.request.Context.Done():
+			call.errored(call.request.Context.Err())
+			return
+		}
 	}
 }
 

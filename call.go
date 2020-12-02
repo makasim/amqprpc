@@ -13,9 +13,9 @@ var ErrClosed = errors.New("amqprpc: call closed")
 type Call struct {
 	AutoAck bool
 
-	message  publisher.Message
-	delivery amqp.Delivery
-	error    error
+	request publisher.Message
+	reply   amqp.Delivery
+	error   error
 
 	mux     sync.Mutex
 	closeCh chan struct{}
@@ -34,34 +34,34 @@ func newCall(msg publisher.Message, doneCh chan *Call, pool *pool, autoAck bool)
 
 	return &Call{
 		AutoAck: autoAck,
-		message: msg,
+		request: msg,
 		closeCh: make(chan struct{}),
 		doneCh:  doneCh,
 		pool:    pool,
 	}
 }
 
-func (call *Call) Message() publisher.Message {
+func (call *Call) Request() publisher.Message {
 	call.mux.Lock()
 	defer call.mux.Unlock()
 
-	return call.message
+	return call.request
 }
 
 func (call *Call) set(msg publisher.Message) {
 	call.mux.Lock()
 	defer call.mux.Unlock()
-	call.message = msg
+	call.request = msg
 }
 
-func (call *Call) Delivery() (amqp.Delivery, error) {
+func (call *Call) Reply() (amqp.Delivery, error) {
 	call.mux.Lock()
 	defer call.mux.Unlock()
 	if !call.done {
 		return amqp.Delivery{}, ErrNotDone
 	}
 
-	return call.delivery, call.error
+	return call.reply, call.error
 }
 
 func (call *Call) Done() <-chan *Call {
@@ -79,11 +79,11 @@ func (call *Call) Close() {
 		return
 	}
 
-	corrID := call.message.Publishing.CorrelationId
+	corrID := call.request.Publishing.CorrelationId
 
 	call.done = true
 	call.error = ErrClosed
-	call.delivery = amqp.Delivery{}
+	call.reply = amqp.Delivery{}
 	call.doneCh <- call
 	close(call.closeCh)
 	call.mux.Unlock()
@@ -98,10 +98,10 @@ func (call *Call) errored(err error) {
 		return
 	}
 
-	corrID := call.message.Publishing.CorrelationId
+	corrID := call.request.Publishing.CorrelationId
 	call.done = true
 	call.error = err
-	call.delivery = amqp.Delivery{}
+	call.reply = amqp.Delivery{}
 	call.doneCh <- call
 	close(call.closeCh)
 	call.mux.Unlock()
@@ -116,11 +116,11 @@ func (call *Call) ok(msg amqp.Delivery) bool {
 		return false
 	}
 
-	corrID := call.message.Publishing.CorrelationId
+	corrID := call.request.Publishing.CorrelationId
 
 	call.done = true
 	call.error = nil
-	call.delivery = msg
+	call.reply = msg
 	call.doneCh <- call
 	close(call.closeCh)
 	call.mux.Unlock()

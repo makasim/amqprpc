@@ -50,7 +50,7 @@ func main() {
 
 	select {
 	case <-call.Done():
-		rpl, err := call.Delivery()
+		rpl, err := call.Reply()
 		if err != nil {
 			log.Fatal(err)
 			return

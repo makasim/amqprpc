@@ -60,13 +60,13 @@ func TestNoConsumerConnectionNotErroredOnUnready(t *testing.T) {
 	}, make(chan *amqprpc.Call, 1))
 
 	time.Sleep(500 * time.Millisecond)
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: call is not done")
 
 	require.NoError(t, client.Close())
 
 	<-call.Done()
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: client is shut down")
 }
 
@@ -104,13 +104,13 @@ func TestNoConsumerConnectionContextCanceled(t *testing.T) {
 	}, make(chan *amqprpc.Call, 1))
 
 	time.Sleep(500 * time.Millisecond)
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: call is not done")
 
 	cancelFunc()
 
 	<-call.Done()
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "context canceled")
 
 	require.NoError(t, client.Close())
@@ -148,11 +148,11 @@ func TestNoConsumerConnectionContextDeadlined(t *testing.T) {
 		Context: ctx,
 	}, make(chan *amqprpc.Call, 1))
 
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: call is not done")
 
 	<-call.Done()
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	consumerDial.Close()
 	require.EqualError(t, err, "context deadline exceeded")
 
@@ -193,7 +193,7 @@ func TestConsumerConnectionErroredOnUnready(t *testing.T) {
 
 	call = <-call.Done()
 
-	_, err = call.Delivery()
+	_, err = call.Reply()
 
 	require.EqualError(t, err, fmt.Sprintf("amqprpc: consumer unready: %s", amqp.ErrClosed))
 
@@ -231,7 +231,7 @@ func TestPublisherConnectionErroredOnUnready(t *testing.T) {
 		ErrOnUnready: true,
 	}, make(chan *amqprpc.Call, 1)).Done()
 
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.True(t, strings.Contains(err.Error(), "publisher not ready"))
 
 	require.NoError(t, client.Close())
@@ -269,13 +269,13 @@ func TestNoPublisherConnectionContextCanceled(t *testing.T) {
 	}, make(chan *amqprpc.Call, 1))
 
 	time.Sleep(500 * time.Millisecond)
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: call is not done")
 
 	cancelFunc()
 
 	<-call.Done()
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "context canceled")
 
 	require.NoError(t, client.Close())
@@ -316,11 +316,11 @@ func TestNoPublisherConnectionContextDeadlined(t *testing.T) {
 	}, make(chan *amqprpc.Call, 1))
 
 	time.Sleep(500 * time.Millisecond)
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: call is not done")
 
 	<-call.Done()
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "context deadline exceeded")
 
 	require.NoError(t, client.Close())
@@ -364,12 +364,12 @@ func TestCallAndReplyTempReplyQueue(t *testing.T) {
 
 	select {
 	case <-call.Done():
-		msg, err := call.Delivery()
+		msg, err := call.Reply()
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(msg.Body))
 
 		call.Close()
-		msg, err = call.Delivery()
+		msg, err = call.Reply()
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(msg.Body))
 	case <-timer.C:
@@ -425,12 +425,12 @@ func TestCallAndReplyCustomReplyQueue(t *testing.T) {
 
 	select {
 	case <-call.Done():
-		msg, err := call.Delivery()
+		msg, err := call.Reply()
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(msg.Body))
 
 		call.Close()
-		msg, err = call.Delivery()
+		msg, err = call.Reply()
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(msg.Body))
 	case <-timer.C:
@@ -473,11 +473,11 @@ func TestCancelBeforeReply(t *testing.T) {
 
 	time.Sleep(time.Millisecond * 500)
 	call.Close()
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: call closed")
 
 	time.Sleep(time.Second)
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: call closed")
 
 	consumerDial.Close()
@@ -521,7 +521,7 @@ func TestSendToClosedClient(t *testing.T) {
 
 	<-call.Done()
 
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: client is shut down")
 }
 
@@ -562,7 +562,7 @@ func TestShutdownGracePeriodEndedWithAutoDeletedQueue(t *testing.T) {
 	assert.EqualError(t, client.Close(), "amqprpc: shutdown grace period time out: some calls have not been done")
 
 	<-call.Done()
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	assert.Equal(t, amqprpc.ErrShutdown, err)
 }
 
@@ -606,7 +606,7 @@ func TestShutdownGracePeriodEndedWithNoAutoDeleted(t *testing.T) {
 
 	assert.EqualError(t, client.Close(), "amqprpc: shutdown grace period time out: some calls have not been done")
 
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	assert.Equal(t, amqprpc.ErrShutdown, err)
 }
 
@@ -696,11 +696,11 @@ func TestErrorReplyQueueHasGoneIfReplyQueueAutoDeleted(t *testing.T) {
 
 	select {
 	case <-call.Done():
-		_, err := call.Delivery()
+		_, err := call.Reply()
 		require.Equal(t, err, amqprpc.ErrReplyQueueGoneAway)
 
 		call.Close()
-		_, err = call.Delivery()
+		_, err = call.Reply()
 		require.Equal(t, err, amqprpc.ErrReplyQueueGoneAway)
 	case <-timer.C:
 		call.Close()
@@ -754,11 +754,11 @@ func TestErrorReplyQueueHasGoneIfTemporaryQueue(t *testing.T) {
 
 	select {
 	case <-call.Done():
-		_, err := call.Delivery()
+		_, err := call.Reply()
 		require.Equal(t, err, amqprpc.ErrReplyQueueGoneAway)
 
 		call.Close()
-		_, err = call.Delivery()
+		_, err = call.Reply()
 		require.Equal(t, err, amqprpc.ErrReplyQueueGoneAway)
 	case <-timer.C:
 		call.Close()
@@ -824,12 +824,12 @@ func TestCallAndReplyWithNoAutoDeleteQueueAndConsumerLostConnection(t *testing.T
 
 	select {
 	case <-call.Done():
-		rpl, err := call.Delivery()
+		rpl, err := call.Reply()
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(rpl.Body))
 
 		call.Close()
-		_, err = call.Delivery()
+		_, err = call.Reply()
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(rpl.Body))
 	case <-timer.C:
