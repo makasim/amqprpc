@@ -131,28 +131,32 @@ func New(
 
 func (c *Client) serveConsumerQueue() {
 	closeCh := make(chan struct{})
+	var localReplyQueueCh chan replyQueue
+	var queue = ""
+
 loop:
 	for {
 		select {
-		case consumerState := <-c.consumerStateCh:
-			for {
-				if consumerState.Unready != nil {
-					break
-				}
+		case state := <-c.consumerStateCh:
 
-				select {
-				case c.replyQueueCh <- replyQueue{
-					name:    consumerState.Ready.Queue,
-					closeCh: closeCh,
-				}:
-					continue loop
-				case <-c.consumer.NotifyClosed():
-					return
-				}
+			if state.Unready != nil {
+				localReplyQueueCh = nil
 			}
+
+			if state.Ready != nil {
+				localReplyQueueCh = c.replyQueueCh
+				queue = state.Ready.Queue
+			}
+
+			continue loop
 		case <-c.consumer.NotifyClosed():
 			return
+		case localReplyQueueCh <- replyQueue{
+			name:    queue,
+			closeCh: closeCh,
+		}:
 		}
+
 		if c.opts.replyQueue.Name == "" || c.opts.replyQueue.AutoDelete {
 			close(closeCh)
 			closeCh = make(chan struct{})
