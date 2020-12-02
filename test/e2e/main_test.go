@@ -218,7 +218,8 @@ func TestPublisherConnectionErroredOnUnready(t *testing.T) {
 		consumerConn,
 		publisherConn,
 		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
-			Name: "foo_reply_queue",
+			Name:    "foo_reply_queue",
+			Declare: true,
 		}),
 		amqprpc.WithShutdownPeriod(time.Second),
 	)
@@ -231,7 +232,6 @@ func TestPublisherConnectionErroredOnUnready(t *testing.T) {
 	}, make(chan *amqprpc.Call, 1)).Done()
 
 	_, err = call.Delivery()
-
 	require.True(t, strings.Contains(err.Error(), "publisher not ready"))
 
 	require.NoError(t, client.Close())
@@ -350,10 +350,9 @@ func TestCallAndReplyTempReplyQueue(t *testing.T) {
 	)
 	require.NoError(t, err)
 	defer client.Close()
-
+	time.Sleep(time.Millisecond * 500)
 	call := client.Go(publisher.Message{
-		Key:          rpcQueue,
-		ErrOnUnready: false,
+		Key: rpcQueue,
 		Publishing: amqp.Publishing{
 			Body: []byte("hello!"),
 		},

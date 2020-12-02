@@ -141,6 +141,10 @@ loop:
 
 			if state.Unready != nil {
 				localReplyQueueCh = nil
+				if c.opts.replyQueue.Name == "" || c.opts.replyQueue.AutoDelete {
+					close(closeCh)
+					closeCh = make(chan struct{})
+				}
 			}
 
 			if state.Ready != nil {
@@ -155,11 +159,6 @@ loop:
 			name:    queue,
 			closeCh: closeCh,
 		}:
-		}
-
-		if c.opts.replyQueue.Name == "" || c.opts.replyQueue.AutoDelete {
-			close(closeCh)
-			closeCh = make(chan struct{})
 		}
 	}
 }
