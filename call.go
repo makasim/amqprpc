@@ -4,7 +4,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/makasim/amqpextra"
+	"github.com/makasim/amqpextra/publisher"
 	"github.com/streadway/amqp"
 )
 
@@ -13,9 +13,9 @@ var ErrClosed = errors.New("amqprpc: call closed")
 type Call struct {
 	AutoAck bool
 
-	publishing amqpextra.Publishing
-	delivery   amqp.Delivery
-	error      error
+	request publisher.Message
+	reply   amqp.Delivery
+	error   error
 
 	mux     sync.Mutex
 	closeCh chan struct{}
@@ -25,7 +25,7 @@ type Call struct {
 	pool *pool
 }
 
-func newCall(msg amqpextra.Publishing, doneCh chan *Call, pool *pool, autoAck bool) *Call {
+func newCall(msg publisher.Message, doneCh chan *Call, pool *pool, autoAck bool) *Call {
 	if doneCh == nil {
 		doneCh = make(chan *Call, 1)
 	} else if cap(doneCh) == 0 {
@@ -33,29 +33,35 @@ func newCall(msg amqpextra.Publishing, doneCh chan *Call, pool *pool, autoAck bo
 	}
 
 	return &Call{
-		AutoAck:    autoAck,
-		publishing: msg,
-		closeCh:    make(chan struct{}),
-		doneCh:     doneCh,
-		pool:       pool,
+		AutoAck: autoAck,
+		request: msg,
+		closeCh: make(chan struct{}),
+		doneCh:  doneCh,
+		pool:    pool,
 	}
 }
 
-func (call *Call) Publishing() amqpextra.Publishing {
+func (call *Call) Request() publisher.Message {
 	call.mux.Lock()
 	defer call.mux.Unlock()
 
-	return call.publishing
+	return call.request
 }
 
-func (call *Call) Delivery() (amqp.Delivery, error) {
+func (call *Call) set(msg publisher.Message) {
+	call.mux.Lock()
+	defer call.mux.Unlock()
+	call.request = msg
+}
+
+func (call *Call) Reply() (amqp.Delivery, error) {
 	call.mux.Lock()
 	defer call.mux.Unlock()
 	if !call.done {
 		return amqp.Delivery{}, ErrNotDone
 	}
 
-	return call.delivery, call.error
+	return call.reply, call.error
 }
 
 func (call *Call) Done() <-chan *Call {
@@ -73,11 +79,11 @@ func (call *Call) Close() {
 		return
 	}
 
-	corrID := call.publishing.Message.CorrelationId
+	corrID := call.request.Publishing.CorrelationId
 
 	call.done = true
 	call.error = ErrClosed
-	call.delivery = amqp.Delivery{}
+	call.reply = amqp.Delivery{}
 	call.doneCh <- call
 	close(call.closeCh)
 	call.mux.Unlock()
@@ -92,11 +98,10 @@ func (call *Call) errored(err error) {
 		return
 	}
 
-	corrID := call.publishing.Message.CorrelationId
-
+	corrID := call.request.Publishing.CorrelationId
 	call.done = true
 	call.error = err
-	call.delivery = amqp.Delivery{}
+	call.reply = amqp.Delivery{}
 	call.doneCh <- call
 	close(call.closeCh)
 	call.mux.Unlock()
@@ -111,11 +116,11 @@ func (call *Call) ok(msg amqp.Delivery) bool {
 		return false
 	}
 
-	corrID := call.publishing.Message.CorrelationId
+	corrID := call.request.Publishing.CorrelationId
 
 	call.done = true
 	call.error = nil
-	call.delivery = msg
+	call.reply = msg
 	call.doneCh <- call
 	close(call.closeCh)
 	call.mux.Unlock()

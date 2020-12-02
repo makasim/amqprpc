@@ -5,25 +5,27 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/makasim/amqpextra/publisher"
+
 	"time"
 
 	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/makasim/amqpextra"
-	"github.com/makasim/amqpextra/middleware"
+	"github.com/makasim/amqpextra/consumer"
+	"github.com/makasim/amqpextra/consumer/middleware"
 	"github.com/streadway/amqp"
 )
 
 var ErrNotDone = errors.New("amqprpc: call is not done")
-var ErrPublisherUnready = errors.New("amqprpc: publisher unready")
-var ErrConsumerUnready = errors.New("amqprpc: consumer unready")
 var ErrReplyQueueGoneAway = errors.New("amqprpc: reply queue has gone away")
 var ErrShutdown = errors.New("amqprpc: client is shut down")
 
 type options struct {
-	replyQueue     ReplyQueue
-	consumer       Consumer
+	replyQueue ReplyQueue
+	consumer   Consumer
+
 	preFetchCount  int
 	workerCount    int
 	shutdownPeriod time.Duration
@@ -40,17 +42,17 @@ type Client struct {
 	context    context.Context
 	cancelFunc context.CancelFunc
 
-	pool            *pool
-	consumerConn    *amqpextra.Connection
-	consumer        *amqpextra.Consumer
-	consumerCloseCh chan struct{}
+	pool *pool
 
-	publisherConn    *amqpextra.Connection
-	publisherCloseCh chan struct{}
-	publisher        *amqpextra.Publisher
+	consumer          *consumer.Consumer
+	consumerStateCh   chan consumer.State
+	consumerUnreadyCh chan error
 
-	setReplyQueueCh chan string
-	replyQueueCh    chan replyQueue
+	publisher          *publisher.Publisher
+	publisherStateCh   chan publisher.State
+	publisherUnreadyCh chan error
+
+	replyQueueCh chan replyQueue
 
 	closeCallsCh chan struct{}
 
@@ -59,11 +61,11 @@ type Client struct {
 }
 
 func New(
-	publisherConn,
-	consumerConn *amqpextra.Connection,
+	consumerConnCh,
+	publisherConnCh <-chan *amqpextra.Connection,
 	opts ...Option,
 ) (*Client, error) {
-	client := &Client{
+	c := &Client{
 		opts: options{
 			replyQueue: ReplyQueue{
 				Name:       "",
@@ -80,130 +82,90 @@ func New(
 			shutdownPeriod: 20 * time.Second,
 		},
 
-		context: context.Background(),
-
-		consumerConn:    consumerConn,
-		consumerCloseCh: make(chan struct{}),
-
-		publisherConn:    publisherConn,
-		publisherCloseCh: make(chan struct{}),
-		publisher:        publisherConn.Publisher(),
-
-		closeCallsCh: make(chan struct{}),
-
-		setReplyQueueCh: make(chan string, 1),
-		replyQueueCh:    make(chan replyQueue),
-
-		pool: newPool(),
+		context:            context.Background(),
+		closeCallsCh:       make(chan struct{}),
+		replyQueueCh:       make(chan replyQueue),
+		consumerUnreadyCh:  make(chan error),
+		consumerStateCh:    make(chan consumer.State, 1),
+		publisherUnreadyCh: make(chan error),
+		publisherStateCh:   make(chan publisher.State, 1),
+		pool:               newPool(),
 	}
 
 	for _, opt := range opts {
-		opt(client)
+		opt(c)
 	}
 
-	client.context, client.cancelFunc = context.WithCancel(client.context)
-	client.consumer = client.consumerConn.Consumer("", amqpextra.WorkerFunc(client.reply))
-	client.consumer.SetWorkerNum(client.opts.workerCount)
-	client.consumer.SetInitFunc(client.initConsumer)
-	client.consumer.Use(middleware.Recover(), middleware.AckNack())
+	handler := consumer.Wrap(
+		consumer.HandlerFunc(c.reply),
+		middleware.Recover(),
+		middleware.AckNack(),
+	)
+	
+	var err error
 
-	go func() {
-		defer close(client.publisherCloseCh)
+	c.consumer, err = amqpextra.NewConsumer(
+		consumerConnCh,
+		c.opts.resolveConsumerOptions(handler, c.consumerStateCh)...)
+	if err != nil {
+		return nil, err
+	}
 
-		client.publisher.Run()
-	}()
+	c.publisher, err = amqpextra.NewPublisher(
+		publisherConnCh,
+		publisher.WithNotify(c.publisherStateCh))
+	if err != nil {
+		return nil, err
+	}
+	
+	c.context, c.cancelFunc = context.WithCancel(c.context)
 
-	go func() {
-		defer close(client.consumerCloseCh)
+	go c.serveConsumerReplyQueue()
+	go c.serveConsumerUnreadyState()
+	go c.servePublisherUnreadyState()
 
-		client.consumer.Run()
-	}()
-
-	go func() {
-		closeCh := make(chan struct{})
-
-		for {
-			select {
-			case <-client.consumer.Ready():
-				rq := <-client.setReplyQueueCh
-
-			loop:
-				for {
-					select {
-					case client.replyQueueCh <- replyQueue{
-						name:    rq,
-						closeCh: closeCh,
-					}:
-					case <-client.consumer.Unready():
-						break loop
-					case <-client.consumerCloseCh:
-						return
-					}
-				}
-			case <-client.consumerCloseCh:
-				return
-			}
-
-			if client.opts.replyQueue.Name == "" || client.opts.replyQueue.AutoDelete {
-				close(closeCh)
-				closeCh = make(chan struct{})
-			}
-		}
-	}()
-
-	go func() {
-		select {
-		case <-client.context.Done():
-			client.Close()
-		case <-client.publisherCloseCh:
-			return
-		}
-	}()
-
-	return client, nil
+	return c, nil
 }
 
-func (client *Client) Go(msg amqpextra.Publishing, done chan *Call) *Call {
-	call := newCall(msg, done, client.pool, client.opts.consumer.AutoAck)
-	go client.send(call)
+func (c *Client) Go(msg publisher.Message, done chan *Call) *Call {
+	call := newCall(msg, done, c.pool, c.opts.consumer.AutoAck)
+	go c.send(call)
 
 	return call
 }
 
-func (client *Client) Call(msg amqpextra.Publishing) (amqp.Delivery, error) {
+func (c *Client) Call(msg publisher.Message) (amqp.Delivery, error) {
 	doneCh := make(chan *Call, 1)
-	call := newCall(msg, doneCh, client.pool, client.opts.consumer.AutoAck)
-	client.send(call)
-
-	return call.Delivery()
+	call := newCall(msg, doneCh, c.pool, c.opts.consumer.AutoAck)
+	c.send(call)
+	return call.Reply()
 }
 
-func (client *Client) Close() error {
-	client.closingMutex.Lock()
-	if client.closing {
-		client.closingMutex.Unlock()
+func (c *Client) Close() error {
+	c.closingMutex.Lock()
+	if c.closing {
+		c.closingMutex.Unlock()
 		return ErrShutdown
 	}
 
-	client.closing = true
-	client.closingMutex.Unlock()
+	c.closing = true
+	c.closingMutex.Unlock()
 
-	defer client.cancelFunc()
-	defer client.consumerConn.Close()
-	defer client.publisherConn.Close()
+	defer c.cancelFunc()
+	defer c.consumer.Close()
+	defer c.publisher.Close()
 
-	shutdownPeriodTimer := time.NewTimer(client.opts.shutdownPeriod)
+	shutdownPeriodTimer := time.NewTimer(c.opts.shutdownPeriod)
 	defer shutdownPeriodTimer.Stop()
 
-	client.publisher.Close()
+	c.publisher.Close()
 	select {
-	case <-client.publisherCloseCh:
+	case <-c.publisher.NotifyClosed():
 	case <-shutdownPeriodTimer.C:
 		return fmt.Errorf("amqprpc: shutdown grace period time out: publisher not stopped")
 	}
-
 	var result error
-	if client.pool.count() > 0 {
+	if c.pool.count() > 0 {
 		ticker := time.NewTicker(time.Millisecond * 200)
 		defer ticker.Stop()
 
@@ -211,7 +173,7 @@ func (client *Client) Close() error {
 		for {
 			select {
 			case <-ticker.C:
-				if client.pool.count() == 0 {
+				if c.pool.count() == 0 {
 					break loop
 				}
 			case <-shutdownPeriodTimer.C:
@@ -223,11 +185,11 @@ func (client *Client) Close() error {
 		}
 	}
 
-	close(client.closeCallsCh)
+	close(c.closeCallsCh)
 
-	client.consumer.Close()
+	c.consumer.Close()
 	select {
-	case <-client.consumerCloseCh:
+	case <-c.consumer.NotifyClosed():
 	case <-shutdownPeriodTimer.C:
 		return fmt.Errorf("amqprpc: shutdown grace period time out: consumer not stopped")
 	}
@@ -235,79 +197,94 @@ func (client *Client) Close() error {
 	return result
 }
 
-func (client *Client) send(call *Call) {
-	publisherUnreadyCh := client.publisher.Unready()
-	consumerUnreadyCh := client.consumer.Unready()
-	if call.publishing.WaitReady {
-		publisherUnreadyCh = nil
-		consumerUnreadyCh = nil
+func (c *Client) send(call *Call) {
+	var (
+		publisherUnreadyCh chan error
+		consumerUnreadyCh  chan error
+	)
+
+	if call.request.ErrOnUnready {
+		publisherUnreadyCh = c.publisherUnreadyCh
+		consumerUnreadyCh = c.consumerUnreadyCh
 	}
 
-	if call.publishing.Context == nil {
-		call.publishing.Context = context.Background()
+	if call.request.Context == nil {
+		call.request.Context = context.Background()
 	}
 
 	select {
-	case replyQueue := <-client.replyQueueCh:
-		resultCh := make(chan error, 1)
-
-		call.publishing.Message.ReplyTo = replyQueue.name
-		call.publishing.Message.CorrelationId = uuid.New().String()
-		call.publishing.ResultCh = resultCh
-		client.pool.set(call)
-
-		client.publisher.Publish(call.publishing)
-
-		for {
-			select {
-			case err := <-resultCh:
-				if err != nil {
-					call.errored(err)
-					return
-				}
-
-				resultCh = nil
-				continue
-			case <-call.Closed():
-				return
-			case <-call.closeCh:
-				return
-			case <-client.closeCallsCh:
-				call.errored(ErrShutdown)
-				return
-			case <-replyQueue.closeCh:
-				call.errored(ErrReplyQueueGoneAway)
-				return
-			case <-call.publishing.Context.Done():
-				call.errored(call.publishing.Context.Err())
-				return
-			}
+	case rq := <-c.replyQueueCh:
+		msg := call.Request()
+		msg.Publishing.ReplyTo = rq.name
+		msg.Publishing.CorrelationId = uuid.New().String()
+		msg.ResultCh = make(chan error, 1)
+		
+		call.set(msg)
+		c.pool.set(call)
+		
+		err := c.publisher.Publish(call.request)
+		if err != nil {
+			call.errored(err)
+			return
 		}
+
+		c.waitReply(call, rq)
+		return
 	case <-call.Closed():
 		return
 	// noinspection GoNilness
-	case <-consumerUnreadyCh:
-		call.errored(ErrConsumerUnready)
+	case err := <-consumerUnreadyCh:
+		call.errored(fmt.Errorf("amqprpc: consumer unready: %s", err))
 		return
 	// noinspection GoNilness
-	case <-publisherUnreadyCh:
-		call.errored(ErrPublisherUnready)
+	case err := <-publisherUnreadyCh:
+		call.errored(fmt.Errorf("amqprpc: publisher not ready: %s", err))
 		return
-	case <-call.publishing.Context.Done():
-		call.errored(call.publishing.Context.Err())
+	case <-call.request.Context.Done():
+		call.errored(call.request.Context.Err())
 		return
-	case <-client.publisherCloseCh:
+	case <-c.publisher.NotifyClosed():
 		call.errored(ErrShutdown)
 		return
 	}
 }
 
-func (client *Client) reply(_ context.Context, msg amqp.Delivery) interface{} {
+func (c *Client) waitReply(call *Call, rq replyQueue) {
+	publishResultCh := call.Request().ResultCh
+	
+	for {
+		select {
+		case err := <-publishResultCh:
+			if err != nil {
+				call.errored(err)
+				return
+			}
+
+			publishResultCh = nil
+			continue
+		case <-call.Closed():
+			return
+		case <-call.closeCh:
+			return
+		case <-c.closeCallsCh:
+			call.errored(ErrShutdown)
+			return
+		case <-rq.closeCh:
+			call.errored(ErrReplyQueueGoneAway)
+			return
+		case <-call.request.Context.Done():
+			call.errored(call.request.Context.Err())
+			return
+		}
+	}
+}
+
+func (c *Client) reply(_ context.Context, msg amqp.Delivery) interface{} {
 	if msg.CorrelationId == "" {
 		return middleware.Nack
 	}
 
-	call, ok := client.pool.fetch(msg.CorrelationId)
+	call, ok := c.pool.fetch(msg.CorrelationId)
 	if !ok {
 		return middleware.Nack
 	}
@@ -316,73 +293,135 @@ func (client *Client) reply(_ context.Context, msg amqp.Delivery) interface{} {
 		return middleware.Nack
 	}
 
-	return nil
+	return middleware.Ack
 }
 
-func (client *Client) initConsumer(conn *amqp.Connection) (*amqp.Channel, <-chan amqp.Delivery, error) {
-	ch, err := conn.Channel()
-	if err != nil {
-		return nil, nil, err
+func (c *Client) serveConsumerReplyQueue() {
+	closeCh := make(chan struct{})
+	var localReplyQueueCh chan replyQueue
+	var rq replyQueue
+
+	for {
+		select {
+		case state := <-c.consumerStateCh:
+			if state.Unready != nil {
+				if rq == (replyQueue{}) {
+					continue
+				}
+
+				if c.opts.replyQueue.Name == "" || c.opts.replyQueue.AutoDelete{
+					localReplyQueueCh = nil
+					rq = replyQueue{}
+
+					close(closeCh)
+					closeCh = make(chan struct{})
+				}
+
+				continue
+			}
+			
+			if state.Ready != nil {
+				localReplyQueueCh = c.replyQueueCh
+				rq = replyQueue{name: state.Ready.Queue, closeCh: closeCh}
+			}
+
+			continue
+		case <-c.consumer.NotifyClosed():
+			return
+		case localReplyQueueCh <- rq:
+		}
 	}
+}
 
-	err = ch.Qos(client.opts.preFetchCount, 0, false)
-	if err != nil {
-		return nil, nil, err
+func (c *Client) serveConsumerUnreadyState() {
+	localStateCh := c.consumer.Notify(make(chan consumer.State, 1))
+	localConsumerUnreadyCh := c.consumerUnreadyCh
+	var err error = amqp.ErrClosed
+
+	for {
+		select {
+		case state, ok := <-localStateCh:
+			if !ok {
+				panic("that should never happen")
+			}
+
+			if state.Ready != nil {
+				localConsumerUnreadyCh = nil
+			}
+			if state.Unready != nil {
+				err = state.Unready.Err
+				localConsumerUnreadyCh = c.consumerUnreadyCh
+			}
+
+			continue
+		case localConsumerUnreadyCh <- err:
+			continue
+		case <-c.context.Done():
+			return
+		}
 	}
+}
 
-	var replyQueue string
-	switch {
-	case client.opts.replyQueue.Name == "":
-		rq := client.opts.replyQueue
+func (c *Client) servePublisherUnreadyState() {
+	localPublisherUnreadyCh := c.publisherUnreadyCh
+	var err error = amqp.ErrClosed
 
-		q, queueDeclareErr := ch.QueueDeclare(
-			"",
-			false,
-			true,
-			true,
-			rq.NoWait,
-			rq.Args,
-		)
-		if queueDeclareErr != nil {
-			return nil, nil, queueDeclareErr
+	for {
+		select {
+		case state, ok := <-c.publisherStateCh:
+			if !ok {
+				panic("that should never happen")
+			}
+			if state.Ready != nil {
+				localPublisherUnreadyCh = nil
+			}
+			if state.Unready != nil {
+				err = state.Unready.Err
+				localPublisherUnreadyCh = c.publisherUnreadyCh
+			}
+
+			continue
+		case localPublisherUnreadyCh <- err:
+			continue
+		case <-c.context.Done():
+			return
+		}
+	}
+}
+
+func (o *options) resolveConsumerOptions(h consumer.Handler, sateCh chan consumer.State) []consumer.Option {
+	var (
+		ops = []consumer.Option{
+			consumer.WithWorker(consumer.NewParallelWorker(o.workerCount)),
+			consumer.WithNotify(sateCh),
+			consumer.WithQos(o.preFetchCount, false),
+			consumer.WithHandler(h),
 		}
 
-		replyQueue = q.Name
-	case client.opts.replyQueue.Declare:
-		rq := client.opts.replyQueue
-
-		q, queueDeclareErr := ch.QueueDeclare(
-			rq.Name,
-			rq.Durable,
-			rq.AutoDelete,
-			rq.Exclusive,
-			rq.NoWait,
-			rq.Args,
-		)
-		if queueDeclareErr != nil {
-			return nil, nil, queueDeclareErr
-		}
-
-		replyQueue = q.Name
-	default:
-		replyQueue = client.opts.replyQueue.Name
-	}
-
-	c := client.opts.consumer
-	msgCh, err := ch.Consume(
-		replyQueue,
-		c.Tag,
-		c.AutoAck,
-		c.Exclusive,
-		c.NoLocal,
-		c.NoWait,
-		c.Args,
+		declare = o.replyQueue.Declare
+		name    = o.replyQueue.Name
 	)
-	if err != nil {
-		return nil, nil, err
+
+	if declare && name == "" {
+		ops = append(ops, consumer.WithTmpQueue())
+	} else if !declare && name == "" {
+		panic("declare flag or queue name for ReplyQueue must be provided in WithReplyQueue")
 	}
 
-	client.setReplyQueueCh <- replyQueue
+	if declare && name != "" {
+		ops = append(ops, consumer.WithDeclareQueue(
+			o.replyQueue.Name,
+			o.replyQueue.Durable,
+			o.replyQueue.AutoDelete,
+			o.replyQueue.Exclusive,
+			o.replyQueue.NoWait,
+			o.replyQueue.Args,
+		))
+	}
 
-	return ch, msgCh, nil
+	if !declare && name != "" {
+		ops = append(ops, consumer.WithQueue(name))
+	}
+
+	return ops
 }

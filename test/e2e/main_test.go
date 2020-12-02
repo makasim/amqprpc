@@ -2,7 +2,12 @@ package e2e_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/makasim/amqpextra/declare"
+
+	"github.com/makasim/amqpextra/publisher"
 
 	"github.com/makasim/amqpextra"
 	"go.uber.org/goleak"
@@ -19,13 +24,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const AMQPDSN = "amqp://guest:guest@rabbitmq:5672/amqprpc"
+const (
+	AMQPDSN    = "amqp://guest:guest@rabbitmq:5672/amqprpc"
+	InvalidDSN = "amqp://guest:guest@invalid:5672/amqprpc"
+)
 
-func TestNoConsumerConnectionWaitReady(t *testing.T) {
+func TestNoConsumerConnectionNotErroredOnUnready(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	publisherConn := amqpextra.Dial([]string{AMQPDSN})
-	consumerConn := amqpextra.Dial([]string{"amqp://guest:guest@invalid:5672/amqprpc"})
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer consumerDial.Close()
+
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(InvalidDSN))
+	require.NoError(t, err)
+	defer publisherDial.Close()
+
+	consumerConn := consumerDial.ConnectionCh()
+
+	publisherConn := publisherDial.ConnectionCh()
 
 	client, err := amqprpc.New(
 		publisherConn,
@@ -36,28 +53,37 @@ func TestNoConsumerConnectionWaitReady(t *testing.T) {
 		amqprpc.WithShutdownPeriod(time.Second),
 	)
 	require.NoError(t, err)
+	require.NoError(t, err)
 
-	call := client.Go(amqpextra.Publishing{
-		Key:       "foo_queue",
-		WaitReady: true,
+	call := client.Go(publisher.Message{
+		Key: "a_queue",
 	}, make(chan *amqprpc.Call, 1))
 
 	time.Sleep(500 * time.Millisecond)
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: call is not done")
 
 	require.NoError(t, client.Close())
 
 	<-call.Done()
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: client is shut down")
 }
 
 func TestNoConsumerConnectionContextCanceled(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	publisherConn := amqpextra.Dial([]string{AMQPDSN})
-	consumerConn := amqpextra.Dial([]string{"amqp://guest:guest@invalid:5672/amqprpc"})
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer consumerDial.Close()
+
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(InvalidDSN))
+	require.NoError(t, err)
+	defer publisherDial.Close()
+
+	consumerConn := consumerDial.ConnectionCh()
+
+	publisherConn := publisherDial.ConnectionCh()
 
 	client, err := amqprpc.New(
 		publisherConn,
@@ -71,20 +97,20 @@ func TestNoConsumerConnectionContextCanceled(t *testing.T) {
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
 
-	call := client.Go(amqpextra.Publishing{
-		Key:       "foo_queue",
-		Context:   ctx,
-		WaitReady: true,
+	call := client.Go(publisher.Message{
+		Key:          "foo_queue",
+		Context:      ctx,
+		ErrOnUnready: false,
 	}, make(chan *amqprpc.Call, 1))
 
 	time.Sleep(500 * time.Millisecond)
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: call is not done")
 
 	cancelFunc()
 
 	<-call.Done()
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "context canceled")
 
 	require.NoError(t, client.Close())
@@ -93,8 +119,16 @@ func TestNoConsumerConnectionContextCanceled(t *testing.T) {
 func TestNoConsumerConnectionContextDeadlined(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	publisherConn := amqpextra.Dial([]string{AMQPDSN})
-	consumerConn := amqpextra.Dial([]string{"amqp://guest:guest@invalid:5672/amqprpc"})
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer consumerDial.Close()
+
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(InvalidDSN))
+	require.NoError(t, err)
+	defer publisherDial.Close()
+
+	consumerConn := consumerDial.ConnectionCh()
+	publisherConn := publisherDial.ConnectionCh()
 
 	client, err := amqprpc.New(
 		publisherConn,
@@ -109,94 +143,113 @@ func TestNoConsumerConnectionContextDeadlined(t *testing.T) {
 	ctx, cancelFunc := context.WithTimeout(context.Background(), 600*time.Millisecond)
 	defer cancelFunc()
 
-	call := client.Go(amqpextra.Publishing{
-		Key:       "foo_queue",
-		Context:   ctx,
-		WaitReady: true,
+	call := client.Go(publisher.Message{
+		Key:     "foo_queue",
+		Context: ctx,
 	}, make(chan *amqprpc.Call, 1))
 
-	time.Sleep(500 * time.Millisecond)
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: call is not done")
 
 	<-call.Done()
-	_, err = call.Delivery()
+	_, err = call.Reply()
+	consumerDial.Close()
 	require.EqualError(t, err, "context deadline exceeded")
 
 	require.NoError(t, client.Close())
 }
 
-func TestNoConsumerConnectionNoWaitReady(t *testing.T) {
+func TestConsumerConnectionErroredOnUnready(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	publisherConn := amqpextra.Dial([]string{AMQPDSN})
-	<-publisherConn.Ready()
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(InvalidDSN))
+	require.NoError(t, err)
+	defer consumerDial.Close()
 
-	consumerConn := amqpextra.Dial([]string{"amqp://guest:guest@invalid:5672/amqprpc"})
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer publisherDial.Close()
+
+	publisherConn := publisherDial.ConnectionCh()
+	consumerConn := consumerDial.ConnectionCh()
 
 	client, err := amqprpc.New(
-		publisherConn,
 		consumerConn,
+		publisherConn,
 		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
-			Name: "foo_reply_queue",
+			Name: "a_reply_queue",
 		}),
 		amqprpc.WithShutdownPeriod(time.Second),
 	)
 	require.NoError(t, err)
+	defer client.Close()
 
-	call := client.Go(amqpextra.Publishing{
-		Key:       "foo_queue",
-		WaitReady: false,
-	}, make(chan *amqprpc.Call, 1))
+	time.Sleep(time.Second)
+	call := client.Go(
+		publisher.Message{
+			Key:          "foo_queue",
+			ErrOnUnready: true,
+		}, make(chan *amqprpc.Call, 1))
 
-	<-call.Done()
-	_, err = call.Delivery()
-	require.EqualError(t, err, "amqprpc: consumer unready")
+	call = <-call.Done()
+
+	_, err = call.Reply()
+
+	require.EqualError(t, err, fmt.Sprintf("amqprpc: consumer unready: %s", amqp.ErrClosed))
 
 	require.NoError(t, client.Close())
 }
 
-func TestNoPublisherConnectionWaitReady(t *testing.T) {
+func TestPublisherConnectionErroredOnUnready(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	publisherConn := amqpextra.Dial([]string{"amqp://guest:guest@invalid:5672/amqprpc"})
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer consumerDial.Close()
 
-	consumerConn := amqpextra.Dial([]string{AMQPDSN})
-	<-consumerConn.Ready()
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(InvalidDSN))
+	require.NoError(t, err)
+	defer publisherDial.Close()
+
+	publisherConn := publisherDial.ConnectionCh()
+	consumerConn := consumerDial.ConnectionCh()
 
 	client, err := amqprpc.New(
-		publisherConn,
 		consumerConn,
+		publisherConn,
 		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
-			Name: "foo_reply_queue",
+			Name:    "foo_reply_queue",
+			Declare: true,
 		}),
 		amqprpc.WithShutdownPeriod(time.Second),
 	)
 	require.NoError(t, err)
+	defer client.Close()
+	time.Sleep(time.Second)
+	call := <-client.Go(publisher.Message{
+		Key:          "foo_queue",
+		ErrOnUnready: true,
+	}, make(chan *amqprpc.Call, 1)).Done()
 
-	call := client.Go(amqpextra.Publishing{
-		Key:       "foo_queue",
-		WaitReady: true,
-	}, make(chan *amqprpc.Call, 1))
-
-	time.Sleep(500 * time.Millisecond)
-	_, err = call.Delivery()
-	require.EqualError(t, err, "amqprpc: call is not done")
+	_, err = call.Reply()
+	require.True(t, strings.Contains(err.Error(), "publisher not ready"))
 
 	require.NoError(t, client.Close())
-
-	<-call.Done()
-	_, err = call.Delivery()
-	require.EqualError(t, err, "amqprpc: client is shut down")
 }
 
 func TestNoPublisherConnectionContextCanceled(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	publisherConn := amqpextra.Dial([]string{"amqp://guest:guest@invalid:5672/amqprpc"})
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(InvalidDSN))
+	require.NoError(t, err)
+	defer publisherDial.Close()
 
-	consumerConn := amqpextra.Dial([]string{AMQPDSN})
-	<-consumerConn.Ready()
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer consumerDial.Close()
+
+	consumerConn := consumerDial.ConnectionCh()
+	publisherConn := publisherDial.ConnectionCh()
 
 	client, err := amqprpc.New(
 		publisherConn,
@@ -210,20 +263,19 @@ func TestNoPublisherConnectionContextCanceled(t *testing.T) {
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
 
-	call := client.Go(amqpextra.Publishing{
-		Key:       "foo_queue",
-		Context:   ctx,
-		WaitReady: true,
+	call := client.Go(publisher.Message{
+		Key:     "foo_queue",
+		Context: ctx,
 	}, make(chan *amqprpc.Call, 1))
 
 	time.Sleep(500 * time.Millisecond)
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: call is not done")
 
 	cancelFunc()
 
 	<-call.Done()
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "context canceled")
 
 	require.NoError(t, client.Close())
@@ -232,10 +284,16 @@ func TestNoPublisherConnectionContextCanceled(t *testing.T) {
 func TestNoPublisherConnectionContextDeadlined(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	publisherConn := amqpextra.Dial([]string{"amqp://guest:guest@invalid:5672/amqprpc"})
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(InvalidDSN))
+	require.NoError(t, err)
+	defer publisherDial.Close()
 
-	consumerConn := amqpextra.Dial([]string{AMQPDSN})
-	<-consumerConn.Ready()
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer consumerDial.Close()
+
+	consumerConn := consumerDial.ConnectionCh()
+	publisherConn := publisherDial.ConnectionCh()
 
 	client, err := amqprpc.New(
 		publisherConn,
@@ -246,51 +304,24 @@ func TestNoPublisherConnectionContextDeadlined(t *testing.T) {
 		amqprpc.WithShutdownPeriod(time.Second),
 	)
 	require.NoError(t, err)
+	defer client.Close()
 
 	ctx, cancelFunc := context.WithTimeout(context.Background(), 600*time.Millisecond)
 	defer cancelFunc()
 
-	call := client.Go(amqpextra.Publishing{
-		Key:       "foo_queue",
-		Context:   ctx,
-		WaitReady: true,
+	call := client.Go(publisher.Message{
+		Key:          "foo_queue",
+		Context:      ctx,
+		ErrOnUnready: false,
 	}, make(chan *amqprpc.Call, 1))
 
 	time.Sleep(500 * time.Millisecond)
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: call is not done")
 
 	<-call.Done()
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "context deadline exceeded")
-
-	require.NoError(t, client.Close())
-}
-
-func TestNoPublisherConnectionNoWaitReady(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	consumerConn := amqpextra.Dial([]string{AMQPDSN})
-	<-consumerConn.Ready()
-
-	publisherConn := amqpextra.Dial([]string{"amqp://guest:guest@in:5672/amqprpc"})
-
-	client, err := amqprpc.New(
-		publisherConn,
-		consumerConn,
-		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
-			Name: "foo_reply_queue",
-		}))
-	require.NoError(t, err)
-
-	call := client.Go(amqpextra.Publishing{
-		Key:       "foo_queue",
-		WaitReady: false,
-	}, make(chan *amqprpc.Call, 1))
-
-	<-call.Done()
-	_, err = call.Delivery()
-	require.EqualError(t, err, `amqprpc: publisher unready`)
 
 	require.NoError(t, client.Close())
 }
@@ -301,26 +332,28 @@ func TestCallAndReplyTempReplyQueue(t *testing.T) {
 	rpcQueue := rabbitmq.UniqueQueue()
 	defer rabbitmq.RunEchoServer(AMQPDSN, rpcQueue, true)()
 
-	consumerConn := amqpextra.Dial([]string{AMQPDSN})
-	defer consumerConn.Close()
-	publisherConn := amqpextra.Dial([]string{AMQPDSN})
-	defer publisherConn.Close()
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer consumerDial.Close()
+
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer publisherDial.Close()
+
+	consumerConn := consumerDial.ConnectionCh()
+
+	publisherConn := publisherDial.ConnectionCh()
 
 	client, err := amqprpc.New(
 		publisherConn,
 		consumerConn,
-		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
-			Name:    "",
-			Declare: true,
-		}),
 	)
 	require.NoError(t, err)
 	defer client.Close()
-
-	call := client.Go(amqpextra.Publishing{
-		Key:       rpcQueue,
-		WaitReady: true,
-		Message: amqp.Publishing{
+	time.Sleep(time.Millisecond * 500)
+	call := client.Go(publisher.Message{
+		Key: rpcQueue,
+		Publishing: amqp.Publishing{
 			Body: []byte("hello!"),
 		},
 	}, make(chan *amqprpc.Call, 1))
@@ -331,12 +364,12 @@ func TestCallAndReplyTempReplyQueue(t *testing.T) {
 
 	select {
 	case <-call.Done():
-		msg, err := call.Delivery()
+		msg, err := call.Reply()
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(msg.Body))
 
 		call.Close()
-		msg, err = call.Delivery()
+		msg, err = call.Reply()
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(msg.Body))
 	case <-timer.C:
@@ -354,38 +387,34 @@ func TestCallAndReplyCustomReplyQueue(t *testing.T) {
 
 	defer rabbitmq.RunEchoServer(AMQPDSN, rpcQueue, true)()
 
-	consumerConn := amqpextra.Dial([]string{AMQPDSN})
-	defer consumerConn.Close()
-	publisherConn := amqpextra.Dial([]string{AMQPDSN})
-	defer publisherConn.Close()
-
-	_, err := amqpextra.DeclareQueue(
-		context.Background(),
-		consumerConn,
-		replyQueue,
-		false,
-		true,
-		true,
-		false,
-		amqp.Table{},
-	)
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
 	require.NoError(t, err)
+	defer consumerDial.Close()
+
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer publisherDial.Close()
+
+	consumerConn := consumerDial.ConnectionCh()
+	publisherConn := publisherDial.ConnectionCh()
 
 	client, err := amqprpc.New(
 		publisherConn,
 		consumerConn,
 		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
-			Name:    replyQueue,
-			Declare: false,
+			Name:       replyQueue,
+			Declare:    true,
+			AutoDelete: true,
+			Exclusive:  true,
+			Args:       amqp.Table{},
 		}),
 	)
 	require.NoError(t, err)
 	defer client.Close()
 
-	call := client.Go(amqpextra.Publishing{
-		Key:       rpcQueue,
-		WaitReady: true,
-		Message: amqp.Publishing{
+	call := client.Go(publisher.Message{
+		Key: rpcQueue,
+		Publishing: amqp.Publishing{
 			Body: []byte("hello!"),
 		},
 	}, make(chan *amqprpc.Call, 1))
@@ -396,12 +425,12 @@ func TestCallAndReplyCustomReplyQueue(t *testing.T) {
 
 	select {
 	case <-call.Done():
-		msg, err := call.Delivery()
+		msg, err := call.Reply()
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(msg.Body))
 
 		call.Close()
-		msg, err = call.Delivery()
+		msg, err = call.Reply()
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(msg.Body))
 	case <-timer.C:
@@ -415,16 +444,19 @@ func TestCancelBeforeReply(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	rpcQueue := rabbitmq.UniqueQueue()
-	defer rabbitmq.RunSleepServer(AMQPDSN, rpcQueue, time.Second)()
+	defer rabbitmq.RunSleepServer(AMQPDSN, rpcQueue, time.Second, true)()
 
-	consumerConn := amqpextra.Dial([]string{AMQPDSN})
-	defer consumerConn.Close()
-	publisherConn := amqpextra.Dial([]string{AMQPDSN})
-	defer publisherConn.Close()
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer consumerDial.Close()
+
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer consumerDial.Close()
 
 	client, err := amqprpc.New(
-		publisherConn,
-		consumerConn,
+		consumerDial.ConnectionCh(),
+		publisherDial.ConnectionCh(),
 		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
 			Name:    "",
 			Declare: true,
@@ -433,24 +465,25 @@ func TestCancelBeforeReply(t *testing.T) {
 	require.NoError(t, err)
 	defer client.Close()
 
-	call := client.Go(amqpextra.Publishing{
-		Key:       rpcQueue,
-		WaitReady: true,
-		Message: amqp.Publishing{
-			Body: []byte("hello!"),
-		},
+	call := client.Go(publisher.Message{
+		Key:          rpcQueue,
+		ErrOnUnready: false,
 	}, make(chan *amqprpc.Call, 1))
 	defer call.Close()
 
 	time.Sleep(time.Millisecond * 500)
 	call.Close()
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: call closed")
 
 	time.Sleep(time.Second)
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: call closed")
 
+	consumerDial.Close()
+	publisherDial.Close()
+	<-publisherDial.NotifyClosed()
+	<-consumerDial.NotifyClosed()
 	require.NoError(t, client.Close())
 }
 
@@ -459,11 +492,16 @@ func TestSendToClosedClient(t *testing.T) {
 
 	rpcQueue := rabbitmq.UniqueQueue()
 
-	consumerConn := amqpextra.Dial([]string{AMQPDSN})
-	defer consumerConn.Close()
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer consumerDial.Close()
 
-	publisherConn := amqpextra.Dial([]string{AMQPDSN})
-	defer publisherConn.Close()
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer publisherDial.Close()
+
+	consumerConn := consumerDial.ConnectionCh()
+	publisherConn := publisherDial.ConnectionCh()
 
 	client, err := amqprpc.New(
 		publisherConn,
@@ -473,17 +511,17 @@ func TestSendToClosedClient(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, client.Close())
 
-	call := client.Go(amqpextra.Publishing{
-		Key:       rpcQueue,
-		WaitReady: true,
-		Message: amqp.Publishing{
+	call := client.Go(publisher.Message{
+		Key:          rpcQueue,
+		ErrOnUnready: false,
+		Publishing: amqp.Publishing{
 			Body: []byte("hello!"),
 		},
 	}, make(chan *amqprpc.Call, 1))
 
 	<-call.Done()
 
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	require.EqualError(t, err, "amqprpc: client is shut down")
 }
 
@@ -492,11 +530,16 @@ func TestShutdownGracePeriodEndedWithAutoDeletedQueue(t *testing.T) {
 
 	rpcQueue := rabbitmq.UniqueQueue()
 
-	consumerConn := amqpextra.Dial([]string{AMQPDSN})
-	defer consumerConn.Close()
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer consumerDial.Close()
 
-	publisherConn := amqpextra.Dial([]string{AMQPDSN})
-	defer publisherConn.Close()
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer publisherDial.Close()
+
+	consumerConn := consumerDial.ConnectionCh()
+	publisherConn := publisherDial.ConnectionCh()
 
 	client, err := amqprpc.New(
 		publisherConn,
@@ -504,11 +547,12 @@ func TestShutdownGracePeriodEndedWithAutoDeletedQueue(t *testing.T) {
 		amqprpc.WithShutdownPeriod(time.Second),
 	)
 	require.NoError(t, err)
+	defer client.Close()
 
-	call := client.Go(amqpextra.Publishing{
-		Key:       rpcQueue,
-		WaitReady: true,
-		Message: amqp.Publishing{
+	call := client.Go(publisher.Message{
+		Key:          rpcQueue,
+		ErrOnUnready: false,
+		Publishing: amqp.Publishing{
 			Body: []byte("hello!"),
 		},
 	}, make(chan *amqprpc.Call, 1))
@@ -518,7 +562,7 @@ func TestShutdownGracePeriodEndedWithAutoDeletedQueue(t *testing.T) {
 	assert.EqualError(t, client.Close(), "amqprpc: shutdown grace period time out: some calls have not been done")
 
 	<-call.Done()
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	assert.Equal(t, amqprpc.ErrShutdown, err)
 }
 
@@ -527,11 +571,16 @@ func TestShutdownGracePeriodEndedWithNoAutoDeleted(t *testing.T) {
 
 	rpcQueue := rabbitmq.UniqueQueue()
 
-	consumerConn := amqpextra.Dial([]string{AMQPDSN})
-	defer consumerConn.Close()
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer consumerDial.Close()
 
-	publisherConn := amqpextra.Dial([]string{AMQPDSN})
-	defer publisherConn.Close()
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer publisherDial.Close()
+
+	consumerConn := consumerDial.ConnectionCh()
+	publisherConn := publisherDial.ConnectionCh()
 
 	client, err := amqprpc.New(
 		publisherConn,
@@ -543,11 +592,12 @@ func TestShutdownGracePeriodEndedWithNoAutoDeleted(t *testing.T) {
 		}),
 	)
 	require.NoError(t, err)
+	defer client.Close()
 
-	call := client.Go(amqpextra.Publishing{
-		Key:       rpcQueue,
-		WaitReady: true,
-		Message: amqp.Publishing{
+	call := client.Go(publisher.Message{
+		Key:          rpcQueue,
+		ErrOnUnready: false,
+		Publishing: amqp.Publishing{
 			Body: []byte("hello!"),
 		},
 	}, make(chan *amqprpc.Call, 1))
@@ -556,7 +606,7 @@ func TestShutdownGracePeriodEndedWithNoAutoDeleted(t *testing.T) {
 
 	assert.EqualError(t, client.Close(), "amqprpc: shutdown grace period time out: some calls have not been done")
 
-	_, err = call.Delivery()
+	_, err = call.Reply()
 	assert.Equal(t, amqprpc.ErrShutdown, err)
 }
 
@@ -564,12 +614,18 @@ func TestShutdownWaitForInflight(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	rpcQueue := rabbitmq.UniqueQueue()
-	defer rabbitmq.RunSleepServer(AMQPDSN, rpcQueue, time.Second)()
+	defer rabbitmq.RunSleepServer(AMQPDSN, rpcQueue, time.Second, true)()
 
-	consumerConn := amqpextra.Dial([]string{AMQPDSN})
-	defer consumerConn.Close()
-	publisherConn := amqpextra.Dial([]string{AMQPDSN})
-	defer publisherConn.Close()
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer consumerDial.Close()
+
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer publisherDial.Close()
+
+	consumerConn := consumerDial.ConnectionCh()
+	publisherConn := publisherDial.ConnectionCh()
 
 	client, err := amqprpc.New(
 		publisherConn,
@@ -578,10 +634,10 @@ func TestShutdownWaitForInflight(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	client.Go(amqpextra.Publishing{
-		Key:       rpcQueue,
-		WaitReady: true,
-		Message: amqp.Publishing{
+	client.Go(publisher.Message{
+		Key:          rpcQueue,
+		ErrOnUnready: true,
+		Publishing: amqp.Publishing{
 			Body: []byte("hello!"),
 		},
 	}, make(chan *amqprpc.Call, 1))
@@ -596,18 +652,25 @@ func TestErrorReplyQueueHasGoneIfReplyQueueAutoDeleted(t *testing.T) {
 	replyQueue := fmt.Sprintf("reply-queue-%d", time.Now().UnixNano())
 
 	consumerConnName := fmt.Sprintf("amqprpc-consumer-%d", time.Now().UnixNano())
-	consumerConn := amqpextra.DialConfig([]string{AMQPDSN}, amqp.Config{
-		Properties: amqp.Table{
+	consumerDial, err := amqpextra.NewDialer(
+		amqpextra.WithConnectionProperties(amqp.Table{
 			"connection_name": consumerConnName,
-		},
-	})
-	defer consumerConn.Close()
-	publisherConn := amqpextra.Dial([]string{AMQPDSN})
-	defer publisherConn.Close()
+		}),
+		amqpextra.WithURL(AMQPDSN),
+	)
+	require.NoError(t, err)
+	defer consumerDial.Close()
+
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer publisherDial.Close()
+
+	consumerConn := consumerDial.ConnectionCh()
+	publisherConn := publisherDial.ConnectionCh()
 
 	client, err := amqprpc.New(
-		publisherConn,
 		consumerConn,
+		publisherConn,
 		amqprpc.WithReplyQueue(amqprpc.ReplyQueue{
 			Name:       replyQueue,
 			AutoDelete: true,
@@ -617,10 +680,9 @@ func TestErrorReplyQueueHasGoneIfReplyQueueAutoDeleted(t *testing.T) {
 	require.NoError(t, err)
 	defer client.Close()
 
-	call := client.Go(amqpextra.Publishing{
-		Key:       rpcQueue,
-		WaitReady: true,
-		Message: amqp.Publishing{
+	call := client.Go(publisher.Message{
+		Key: rpcQueue,
+		Publishing: amqp.Publishing{
 			Body: []byte("hello!"),
 		},
 	}, make(chan *amqprpc.Call, 1))
@@ -634,11 +696,11 @@ func TestErrorReplyQueueHasGoneIfReplyQueueAutoDeleted(t *testing.T) {
 
 	select {
 	case <-call.Done():
-		_, err := call.Delivery()
+		_, err := call.Reply()
 		require.Equal(t, err, amqprpc.ErrReplyQueueGoneAway)
 
 		call.Close()
-		_, err = call.Delivery()
+		_, err = call.Reply()
 		require.Equal(t, err, amqprpc.ErrReplyQueueGoneAway)
 	case <-timer.C:
 		call.Close()
@@ -653,26 +715,32 @@ func TestErrorReplyQueueHasGoneIfTemporaryQueue(t *testing.T) {
 	rpcQueue := rabbitmq.UniqueQueue()
 
 	consumerConnName := fmt.Sprintf("amqprpc-consumer-%d", time.Now().UnixNano())
-	consumerConn := amqpextra.DialConfig([]string{AMQPDSN}, amqp.Config{
-		Properties: amqp.Table{
+	consumerDial, err := amqpextra.NewDialer(
+		amqpextra.WithConnectionProperties(amqp.Table{
 			"connection_name": consumerConnName,
-		},
-	})
-	defer consumerConn.Close()
-	publisherConn := amqpextra.Dial([]string{AMQPDSN})
-	defer publisherConn.Close()
+		}),
+		amqpextra.WithURL(AMQPDSN),
+	)
+	require.NoError(t, err)
+	defer consumerDial.Close()
+
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer publisherDial.Close()
+
+	consumerConn := consumerDial.ConnectionCh()
+	publisherConn := publisherDial.ConnectionCh()
 
 	client, err := amqprpc.New(
-		publisherConn,
 		consumerConn,
+		publisherConn,
 	)
 	require.NoError(t, err)
 	defer client.Close()
 
-	call := client.Go(amqpextra.Publishing{
-		Key:       rpcQueue,
-		WaitReady: true,
-		Message: amqp.Publishing{
+	call := client.Go(publisher.Message{
+		Key: rpcQueue,
+		Publishing: amqp.Publishing{
 			Body: []byte("hello!"),
 		},
 	}, make(chan *amqprpc.Call, 1))
@@ -686,11 +754,11 @@ func TestErrorReplyQueueHasGoneIfTemporaryQueue(t *testing.T) {
 
 	select {
 	case <-call.Done():
-		_, err := call.Delivery()
+		_, err := call.Reply()
 		require.Equal(t, err, amqprpc.ErrReplyQueueGoneAway)
 
 		call.Close()
-		_, err = call.Delivery()
+		_, err = call.Reply()
 		require.Equal(t, err, amqprpc.ErrReplyQueueGoneAway)
 	case <-timer.C:
 		call.Close()
@@ -706,25 +774,23 @@ func TestCallAndReplyWithNoAutoDeleteQueueAndConsumerLostConnection(t *testing.T
 	replyQueue := rabbitmq.UniqueQueue()
 
 	consumerConnName := fmt.Sprintf("amqprpc-consumer-%d", time.Now().UnixNano())
-	consumerConn := amqpextra.DialConfig([]string{AMQPDSN}, amqp.Config{
-		Properties: amqp.Table{
+	consumerDial, err := amqpextra.NewDialer(
+		amqpextra.WithConnectionProperties(amqp.Table{
 			"connection_name": consumerConnName,
-		},
-	})
-	defer consumerConn.Close()
-	publisherConn := amqpextra.Dial([]string{AMQPDSN})
-	defer publisherConn.Close()
-
-	_, err := amqpextra.DeclareQueue(
-		context.Background(),
-		consumerConn,
-		rpcQueue,
-		false,
-		false,
-		false,
-		false,
-		amqp.Table{},
+		}),
+		amqpextra.WithURL(AMQPDSN),
 	)
+	require.NoError(t, err)
+	defer consumerDial.Close()
+
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(AMQPDSN))
+	require.NoError(t, err)
+	defer publisherDial.Close()
+
+	consumerConn := consumerDial.ConnectionCh()
+	publisherConn := publisherDial.ConnectionCh()
+
+	_, err = declare.Queue(context.Background(), consumerDial, rpcQueue, false, false, false, false, amqp.Table{})
 	require.NoError(t, err)
 
 	client, err := amqprpc.New(
@@ -738,11 +804,11 @@ func TestCallAndReplyWithNoAutoDeleteQueueAndConsumerLostConnection(t *testing.T
 		}),
 	)
 	require.NoError(t, err)
+	defer client.Close()
 
-	call := client.Go(amqpextra.Publishing{
-		Key:       rpcQueue,
-		WaitReady: true,
-		Message: amqp.Publishing{
+	call := client.Go(publisher.Message{
+		Key: rpcQueue,
+		Publishing: amqp.Publishing{
 			Body: []byte("hello!"),
 		},
 	}, make(chan *amqprpc.Call, 1))
@@ -758,12 +824,12 @@ func TestCallAndReplyWithNoAutoDeleteQueueAndConsumerLostConnection(t *testing.T
 
 	select {
 	case <-call.Done():
-		rpl, err := call.Delivery()
+		rpl, err := call.Reply()
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(rpl.Body))
 
 		call.Close()
-		_, err = call.Delivery()
+		_, err = call.Reply()
 		require.NoError(t, err)
 		require.Equal(t, "hello!", string(rpl.Body))
 	case <-timer.C:

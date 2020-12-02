@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/makasim/amqpextra/consumer"
+	"github.com/makasim/amqpextra/publisher"
+
 	"log"
 
 	"time"
@@ -23,88 +26,128 @@ func UniqueQueue() string {
 }
 
 func RunEchoServer(dsn, queue string, declare bool) func() {
-	conn := amqpextra.Dial([]string{dsn})
-
-	ctx, cancelFunc := context.WithTimeout(context.Background(), 5*time.Second)
-	if declare {
-		if _, err := amqpextra.DeclareQueue(ctx, conn, queue, false, true, false, false, amqp.Table{}); err != nil {
-			log.Fatal(err)
-		}
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(dsn))
+	if err != nil {
+		log.Fatal(err)
 	}
-	defer cancelFunc()
+	pub, err := amqpextra.NewPublisher(publisherDial.ConnectionCh())
+	if err != nil {
+		panic(err)
+	}
 
-	publisher := conn.Publisher()
-	publisher.Start()
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(dsn))
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	worker := amqpextra.WorkerFunc(func(_ context.Context, msg amqp.Delivery) interface{} {
-		publisher.Publish(amqpextra.Publishing{
+	ctx, cancelFunc := context.WithTimeout(context.Background(), 20*time.Second)
+
+	h := consumer.HandlerFunc(func(ctx context.Context, msg amqp.Delivery) interface{} {
+
+		pub.Publish(publisher.Message{
 			Key: msg.ReplyTo,
-			Message: amqp.Publishing{
+			Publishing: amqp.Publishing{
 				CorrelationId: msg.CorrelationId,
 				Body:          msg.Body,
 			},
 		})
 
-		if err := msg.Ack(false); err != nil {
-			log.Fatal(err)
+		if ackErr := msg.Ack(false); ackErr != nil {
+			panic(ackErr)
 		}
 
 		return nil
 	})
 
-	consumer := conn.Consumer(queue, worker)
-	consumer.Start()
+	var queueOp consumer.Option
+	if declare {
+		queueOp = consumer.WithDeclareQueue(queue, false, true, false, false, amqp.Table{})
+	} else {
+		queueOp = consumer.WithQueue(queue)
+	}
 
-	<-consumer.Ready()
-	<-publisher.Ready()
+	stateCh := make(chan consumer.State, 1)
+
+	c, err := amqpextra.NewConsumer(
+		consumerDial.ConnectionCh(),
+		consumer.WithContext(ctx),
+		consumer.WithHandler(h),
+		consumer.WithNotify(stateCh),
+		queueOp,
+		consumer.WithWorker(consumer.NewParallelWorker(10)),
+	)
+	if err != nil {
+		panic(err)
+	}
 
 	return func() {
-		consumer.Close()
-		publisher.Close()
-		conn.Close()
+		cancelFunc()
+		publisherDial.Close()
+		consumerDial.Close()
+
+		c.Close()
+		pub.Close()
 	}
 }
 
-func RunSleepServer(dsn, queue string, dur time.Duration) func() {
-	conn := amqpextra.Dial([]string{dsn})
-
-	ctx, cancelFunc := context.WithTimeout(context.Background(), 5*time.Second)
-	if _, err := amqpextra.DeclareQueue(ctx, conn, queue, false, true, false, false, amqp.Table{}); err != nil {
+func RunSleepServer(dsn, queue string, dur time.Duration, declare bool) func() {
+	publisherDial, err := amqpextra.NewDialer(amqpextra.WithURL(dsn))
+	if err != nil {
 		log.Fatal(err)
 	}
-	defer cancelFunc()
+	pub, err := amqpextra.NewPublisher(publisherDial.ConnectionCh())
+	if err != nil {
+		panic(err)
+	}
 
-	publisher := conn.Publisher()
-	publisher.Start()
+	consumerDial, err := amqpextra.NewDialer(amqpextra.WithURL(dsn))
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	worker := amqpextra.WorkerFunc(func(_ context.Context, msg amqp.Delivery) interface{} {
+	h := consumer.HandlerFunc(func(ctx context.Context, msg amqp.Delivery) interface{} {
 		time.Sleep(dur)
-
-		publisher.Publish(amqpextra.Publishing{
+		pub.Publish(publisher.Message{
 			Key: msg.ReplyTo,
-			Message: amqp.Publishing{
+			Publishing: amqp.Publishing{
 				CorrelationId: msg.CorrelationId,
 				Body:          msg.Body,
 			},
 		})
 
-		if err := msg.Ack(false); err != nil {
-			log.Fatal(err)
+		if ackErr := msg.Ack(false); ackErr != nil {
+			panic(ackErr)
 		}
 
 		return nil
 	})
 
-	consumer := conn.Consumer(queue, worker)
-	consumer.Start()
+	var queueOp consumer.Option
+	if declare {
+		queueOp = consumer.WithDeclareQueue(queue, false, true, false, false, amqp.Table{})
+	} else {
+		queueOp = consumer.WithQueue(queue)
+	}
 
-	<-consumer.Ready()
-	<-publisher.Ready()
+	stateCh := make(chan consumer.State, 1)
+
+	c, err := amqpextra.NewConsumer(
+		consumerDial.ConnectionCh(),
+		consumer.WithHandler(h),
+		consumer.WithNotify(stateCh),
+		queueOp,
+		consumer.WithWorker(consumer.NewParallelWorker(10)),
+	)
+	if err != nil {
+		panic(err)
+	}
 
 	return func() {
-		consumer.Close()
-		publisher.Close()
-		conn.Close()
+		publisherDial.Close()
+		consumerDial.Close()
+
+		c.Close()
+		pub.Close()
 	}
 }
 
@@ -124,7 +167,7 @@ func CloseConn(userProvidedName string) bool {
 
 		if connUserProvidedName == userProvidedName {
 			req, err := http.NewRequest(
-				"DELETE",
+				http.MethodDelete,
 				fmt.Sprintf("http://guest:guest@rabbitmq:15672/api/connections/%s", conn["name"].(string)),
 				nil,
 			)
