@@ -86,7 +86,9 @@ func New(
 		closeCallsCh:       make(chan struct{}),
 		replyQueueCh:       make(chan replyQueue),
 		consumerUnreadyCh:  make(chan error),
+		consumerStateCh:    make(chan consumer.State, 1),
 		publisherUnreadyCh: make(chan error),
+		publisherStateCh:   make(chan publisher.State, 1),
 		pool:               newPool(),
 	}
 
@@ -99,161 +101,30 @@ func New(
 		middleware.Recover(),
 		middleware.AckNack(),
 	)
+	
+	var err error
 
-	c.consumerUnreadyCh = make(chan error)
-	c.consumerStateCh = make(chan consumer.State, 1)
-	cons, err := amqpextra.NewConsumer(
+	c.consumer, err = amqpextra.NewConsumer(
 		consumerConnCh,
 		c.opts.resolveConsumerOptions(handler, c.consumerStateCh)...)
 	if err != nil {
 		return nil, err
 	}
-	c.consumer = cons
 
-	c.publisherStateCh = make(chan publisher.State, 1)
-
-	pub, err := amqpextra.NewPublisher(
+	c.publisher, err = amqpextra.NewPublisher(
 		publisherConnCh,
 		publisher.WithNotify(c.publisherStateCh))
 	if err != nil {
 		return nil, err
 	}
-
-	c.publisher = pub
+	
 	c.context, c.cancelFunc = context.WithCancel(c.context)
 
-	go c.serveConsumerQueue()
+	go c.serveConsumerReplyQueue()
 	go c.serveConsumerUnreadyState()
 	go c.servePublisherUnreadyState()
 
 	return c, nil
-}
-
-func (c *Client) serveConsumerQueue() {
-	closeCh := make(chan struct{})
-	var localReplyQueueCh chan replyQueue
-	var queue = ""
-
-loop:
-	for {
-		select {
-		case state := <-c.consumerStateCh:
-
-			if state.Unready != nil {
-				localReplyQueueCh = nil
-				if c.opts.replyQueue.Name == "" || c.opts.replyQueue.AutoDelete {
-					close(closeCh)
-					closeCh = make(chan struct{})
-				}
-			}
-
-			if state.Ready != nil {
-				localReplyQueueCh = c.replyQueueCh
-				queue = state.Ready.Queue
-			}
-
-			continue loop
-		case <-c.consumer.NotifyClosed():
-			return
-		case localReplyQueueCh <- replyQueue{
-			name:    queue,
-			closeCh: closeCh,
-		}:
-		}
-	}
-}
-
-func (c *Client) serveConsumerUnreadyState() {
-	localStateCh := c.consumer.Notify(make(chan consumer.State, 1))
-	localConsumerUnreadyCh := c.consumerUnreadyCh
-	var err error = amqp.ErrClosed
-
-	for {
-		select {
-		case state, ok := <-localStateCh:
-			if !ok {
-				panic("that should never happen")
-			}
-
-			if state.Ready != nil {
-				localConsumerUnreadyCh = nil
-			}
-			if state.Unready != nil {
-				err = state.Unready.Err
-				localConsumerUnreadyCh = c.consumerUnreadyCh
-			}
-
-			continue
-		case localConsumerUnreadyCh <- err:
-			continue
-		case <-c.context.Done():
-			return
-		}
-	}
-}
-
-func (c *Client) servePublisherUnreadyState() {
-	localPublisherUnreadyCh := c.publisherUnreadyCh
-	var err error = amqp.ErrClosed
-
-	for {
-		select {
-		case state, ok := <-c.publisherStateCh:
-			if !ok {
-				panic("that should never happen")
-			}
-			if state.Ready != nil {
-				localPublisherUnreadyCh = nil
-			}
-			if state.Unready != nil {
-				err = state.Unready.Err
-				localPublisherUnreadyCh = c.publisherUnreadyCh
-			}
-
-			continue
-		case localPublisherUnreadyCh <- err:
-			continue
-		case <-c.context.Done():
-			return
-		}
-	}
-}
-
-func (o *options) resolveConsumerOptions(h consumer.Handler, sateCh chan consumer.State) []consumer.Option {
-	var (
-		ops = []consumer.Option{
-			consumer.WithWorker(consumer.NewParallelWorker(o.workerCount)),
-			consumer.WithNotify(sateCh),
-			consumer.WithQos(o.preFetchCount, false),
-			consumer.WithHandler(h),
-		}
-
-		declare = o.replyQueue.Declare
-		name    = o.replyQueue.Name
-	)
-
-	if declare && name == "" {
-		ops = append(ops, consumer.WithTmpQueue())
-	} else if !declare && name == "" {
-		panic("declare flag or queue name for ReplyQueue must be provided in WithReplyQueue")
-	}
-
-	if declare && name != "" {
-		ops = append(ops, consumer.WithDeclareQueue(
-			o.replyQueue.Name,
-			o.replyQueue.Durable,
-			o.replyQueue.AutoDelete,
-			o.replyQueue.Exclusive,
-			o.replyQueue.NoWait,
-			o.replyQueue.Args,
-		))
-	}
-
-	if !declare && name != "" {
-		ops = append(ops, consumer.WithQueue(name))
-	}
-
-	return ops
 }
 
 func (c *Client) Go(msg publisher.Message, done chan *Call) *Call {
@@ -423,4 +294,134 @@ func (c *Client) reply(_ context.Context, msg amqp.Delivery) interface{} {
 	}
 
 	return middleware.Ack
+}
+
+func (c *Client) serveConsumerReplyQueue() {
+	closeCh := make(chan struct{})
+	var localReplyQueueCh chan replyQueue
+	var rq replyQueue
+
+	for {
+		select {
+		case state := <-c.consumerStateCh:
+			if state.Unready != nil {
+				if rq == (replyQueue{}) {
+					continue
+				}
+
+				if c.opts.replyQueue.Name == "" || c.opts.replyQueue.AutoDelete{
+					localReplyQueueCh = nil
+					rq = replyQueue{}
+
+					close(closeCh)
+					closeCh = make(chan struct{})
+				}
+
+				continue
+			}
+			
+			if state.Ready != nil {
+				localReplyQueueCh = c.replyQueueCh
+				rq = replyQueue{name: state.Ready.Queue, closeCh: closeCh}
+			}
+
+			continue
+		case <-c.consumer.NotifyClosed():
+			return
+		case localReplyQueueCh <- rq:
+		}
+	}
+}
+
+func (c *Client) serveConsumerUnreadyState() {
+	localStateCh := c.consumer.Notify(make(chan consumer.State, 1))
+	localConsumerUnreadyCh := c.consumerUnreadyCh
+	var err error = amqp.ErrClosed
+
+	for {
+		select {
+		case state, ok := <-localStateCh:
+			if !ok {
+				panic("that should never happen")
+			}
+
+			if state.Ready != nil {
+				localConsumerUnreadyCh = nil
+			}
+			if state.Unready != nil {
+				err = state.Unready.Err
+				localConsumerUnreadyCh = c.consumerUnreadyCh
+			}
+
+			continue
+		case localConsumerUnreadyCh <- err:
+			continue
+		case <-c.context.Done():
+			return
+		}
+	}
+}
+
+func (c *Client) servePublisherUnreadyState() {
+	localPublisherUnreadyCh := c.publisherUnreadyCh
+	var err error = amqp.ErrClosed
+
+	for {
+		select {
+		case state, ok := <-c.publisherStateCh:
+			if !ok {
+				panic("that should never happen")
+			}
+			if state.Ready != nil {
+				localPublisherUnreadyCh = nil
+			}
+			if state.Unready != nil {
+				err = state.Unready.Err
+				localPublisherUnreadyCh = c.publisherUnreadyCh
+			}
+
+			continue
+		case localPublisherUnreadyCh <- err:
+			continue
+		case <-c.context.Done():
+			return
+		}
+	}
+}
+
+func (o *options) resolveConsumerOptions(h consumer.Handler, sateCh chan consumer.State) []consumer.Option {
+	var (
+		ops = []consumer.Option{
+			consumer.WithWorker(consumer.NewParallelWorker(o.workerCount)),
+			consumer.WithNotify(sateCh),
+			consumer.WithQos(o.preFetchCount, false),
+			consumer.WithHandler(h),
+		}
+
+		declare = o.replyQueue.Declare
+		name    = o.replyQueue.Name
+	)
+
+	if declare && name == "" {
+		ops = append(ops, consumer.WithTmpQueue())
+	} else if !declare && name == "" {
+		panic("declare flag or queue name for ReplyQueue must be provided in WithReplyQueue")
+	}
+
+	if declare && name != "" {
+		ops = append(ops, consumer.WithDeclareQueue(
+			o.replyQueue.Name,
+			o.replyQueue.Durable,
+			o.replyQueue.AutoDelete,
+			o.replyQueue.Exclusive,
+			o.replyQueue.NoWait,
+			o.replyQueue.Args,
+		))
+	}
+
+	if !declare && name != "" {
+		ops = append(ops, consumer.WithQueue(name))
+	}
+
+	return ops
 }
